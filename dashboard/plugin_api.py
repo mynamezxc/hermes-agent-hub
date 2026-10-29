@@ -202,7 +202,8 @@ def list_agents() -> list[str]:
     out = ["default"]
     try:
         for d in sorted((root_home() / "profiles").iterdir()):
-            if d.is_dir() and re.fullmatch(r"[A-Za-z0-9_.-]+", d.name):
+            # Hidden dirs are Hermes bookkeeping (.deleted trash, .<name>.staging-<pid> during create), not agents.
+            if d.is_dir() and not d.name.startswith(".") and re.fullmatch(r"[A-Za-z0-9_.-]+", d.name):
                 out.append(d.name)
     except OSError:
         pass

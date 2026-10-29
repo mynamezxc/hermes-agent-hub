@@ -632,6 +632,14 @@ class TeamSetupUsageTest(unittest.TestCase):
         self.m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.m)
 
+    def test_hidden_profile_dirs_are_not_agents(self):
+        for junk in (".deleted", ".media.staging-4242"):
+            (self.home / "profiles" / junk).mkdir(parents=True)
+        self.m.ensure_setup()
+        self.assertNotIn(".deleted", self.m.list_agents())
+        self.assertFalse(any(a.startswith(".") for a in self.m.load_team()))
+        self.assertIn("writer", self.m.list_agents())
+
     def test_first_run_setup_builds_roster(self):
         state = self.m.ensure_setup()
         self.assertEqual(state["version"], self.m.SETUP_VERSION)
