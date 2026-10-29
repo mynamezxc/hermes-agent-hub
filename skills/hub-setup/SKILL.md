@@ -14,8 +14,14 @@ irm https://raw.githubusercontent.com/mynamezxc/hermes-agent-hub/main/install.ps
 # or: hermes plugins install mynamezxc/hermes-agent-hub --enable
 ```
 
-The scripts check that Hermes is installed, install or update the plugin and enable it. Then restart the gateway
-(Desktop: Ctrl+K, "Restart gateway"). Hermes Desktop picks up the page by itself; open Agents Hub from the sidebar.
+The scripts check that Hermes is installed, install or update the plugin and enable its agent half. Then, once:
+1. Restart the gateway (Desktop: Ctrl+K, "Restart gateway").
+2. Turn on the desktop half: Hermes Desktop keeps a package's desktop half OFF until the owner enables it
+   (`--enable` only covers the agent half). Settings > Plugins (or Capabilities > Plugins) > Agents Hub > Desktop on.
+   If the owner says "Agents Hub is not in the sidebar" after installing, this is the cause; the plugin cannot and must
+   not switch itself on.
+3. Open Agents Hub from the sidebar (Ctrl+Alt+H). Still missing: Ctrl+K > Reload desktop plugins, and check that
+   `<HERMES_HOME>/desktop-plugins/agents-hub/plugin.js` exists.
 
 The first time the Hub opens it runs setup (or press "Re-run setup" in the Settings tab):
 - `agents-hub/team.json`: every Hermes profile becomes a member: name from `display_name` in `profile.yaml`, role from

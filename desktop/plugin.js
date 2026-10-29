@@ -424,7 +424,9 @@ function load() {
       try {
         const data = await withTimeout(C.rest(path), REST_TIMEOUT_MS)
 
-        S[key] = res('ready', data)
+        // Hermes keeps hidden bookkeeping dirs under profiles/ (.deleted trash, .<id>.staging-*): never agents,
+        // even when an older gateway still lists them.
+        S[key] = res('ready', key === 'agents' && data && Array.isArray(data.agents) ? { ...data, agents: data.agents.filter(a => a && !String(a.id || '').startsWith('.')) } : data)
       } catch (err) {
         S[key] = res('error', S[key].data, errText(err))
       }
@@ -6602,7 +6604,7 @@ function Accounts({ s, agent }) {
 
 function TeamEditor({ s }) {
   const t = s.team
-  const rows = (t && t.data && t.data.agents) || []
+  const rows = ((t && t.data && t.data.agents) || []).filter(a => a && !String(a.id || '').startsWith('.'))
   const [edit, setEdit] = useState(null)
   const [form, setForm] = useState(false)
   const [busy, setBusy] = useState(false)

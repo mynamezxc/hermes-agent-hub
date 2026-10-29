@@ -72,4 +72,6 @@ if ($Restart) {
 } else {
   Say 'Next: restart the gateway (Desktop: Ctrl+K, "Restart gateway"; CLI: hermes gateway restart).'
 }
-Say 'Hermes Desktop loads the page by itself. Open Agents Hub from the sidebar or press Ctrl+Alt+H.'
+Say 'Then turn on the desktop half ONCE: Hermes Desktop > Settings > Plugins (or Capabilities > Plugins) > Agents Hub > Desktop on.'
+Say '  (Desktop keeps a package''s desktop half off until you enable it; -enable only covers the agent half.)'
+Say 'Open Agents Hub from the sidebar or press Ctrl+Alt+H. Not there? Ctrl+K > Reload desktop plugins.'

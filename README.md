@@ -11,7 +11,7 @@ running commands · scheduled jobs · team roster · Claude & Codex usage at a g
 
 <p>
   <a href="https://github.com/mynamezxc/hermes-agent-hub/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/mynamezxc/hermes-agent-hub?style=flat-square&logo=github&color=5B6CE0"></a>
-  <a href="https://github.com/mynamezxc/hermes-agent-hub/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.6.4-5B6CE0?style=flat-square"></a>
+  <a href="https://github.com/mynamezxc/hermes-agent-hub/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.6.5-5B6CE0?style=flat-square"></a>
   <a href="https://github.com/NousResearch/hermes-agent"><img alt="Hermes Agent plugin" src="https://img.shields.io/badge/Hermes%20Agent-plugin-0E9F8E?style=flat-square"></a>
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-3B8FD9?style=flat-square">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-D9822B?style=flat-square"></a>
@@ -65,9 +65,16 @@ irm https://raw.githubusercontent.com/mynamezxc/hermes-agent-hub/main/install.ps
 hermes plugins install mynamezxc/hermes-agent-hub --enable
 ```
 
-Then restart the gateway (Desktop: <kbd>Ctrl</kbd>+<kbd>K</kbd> → **Restart gateway**, or `hermes gateway restart`).
-Hermes Desktop picks up the page by itself. Open **Agents Hub** from the sidebar or press
-<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd>.
+Then, once:
+
+1. Restart the gateway (Desktop: <kbd>Ctrl</kbd>+<kbd>K</kbd> → **Restart gateway**, or `hermes gateway restart`).
+2. **Turn on the desktop half.** Hermes Desktop keeps a package's desktop half switched **off** until you enable it
+   (`--enable` only enables the agent half). Open **Settings → Plugins** (or **Capabilities → Plugins**), find
+   **Agents Hub** and switch on its *Desktop* toggle. Turning the package on from that page switches both halves on.
+3. Open **Agents Hub** from the sidebar or press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd>.
+
+> No **Agents Hub** entry in the sidebar? It is almost always step 2. Still missing: <kbd>Ctrl</kbd>+<kbd>K</kbd> →
+> **Reload desktop plugins**, and check that `<HERMES_HOME>/desktop-plugins/agents-hub/plugin.js` exists.
 
 <details>
 <summary>Installer options, update, uninstall, manual install</summary>
