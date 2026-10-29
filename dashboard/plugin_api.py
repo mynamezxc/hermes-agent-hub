@@ -20,6 +20,7 @@ import secrets
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -355,7 +356,9 @@ def _agent_card(agent: str, now: float) -> dict[str, Any]:
 
 @router.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "version": VERSION}
+    """Liveness + versions. ``version`` is the API version (kept for old callers); ``plugin_version``
+    lets the page tell 'gateway still runs an older backend, restart it' from real errors."""
+    return {"ok": True, "version": VERSION, "plugin_version": _plugin_version(), "agents": len(list_agents())}
 
 
 @router.get("/agents")
@@ -393,10 +396,32 @@ def _one_line(text: Any, n: int) -> str:
     return _clip(" ".join(decode_content(text).split()), n)
 
 
-def _first_user_text(db: Path, session_id: str, n: int = 90) -> str:
-    r = query(db, "SELECT content FROM messages WHERE session_id = ? AND role = 'user' "
+# A session's first message never changes once it exists, yet every refresh (15 s) asked for it again,
+# one query per session (N+1): seconds on a large state.db. Found texts are cached; empty results are
+# not, since the first message may simply not be written yet.
+_FIRST_CACHE: dict[tuple[str, str, str], str] = {}
+_FIRST_CACHE_MAX = 20000
+
+
+def _first_content(db: Path, session_id: str, roles: str) -> str:
+    key = (str(db), session_id, roles)
+    hit = _FIRST_CACHE.get(key)
+    if hit is not None:
+        return hit
+    role_sql = "role = 'user'" if roles == "user" else "role IN ('user','assistant')"
+    r = query(db, f"SELECT content FROM messages WHERE session_id = ? AND {role_sql} "
                   "AND content IS NOT NULL AND content != '' ORDER BY timestamp, id LIMIT 1", (session_id,))
-    return _one_line(r[0]["content"], n) if r else ""
+    text = decode_content(r[0]["content"]) if r else ""
+    if text:
+        if len(_FIRST_CACHE) >= _FIRST_CACHE_MAX:
+            _FIRST_CACHE.clear()
+        _FIRST_CACHE[key] = text
+    return text
+
+
+def _first_user_text(db: Path, session_id: str, n: int = 90) -> str:
+    text = _first_content(db, session_id, "user")
+    return _one_line(text, n) if text else ""
 
 
 _GENERIC_TITLES = {"tool", "subagent", "oneshot"}
@@ -423,9 +448,8 @@ def _conv_title(db: Path, row: dict[str, Any], delegation: bool = True) -> str:
 
 
 def _preview(db: Path, session_id: str) -> str:
-    r = query(db, "SELECT content FROM messages WHERE session_id = ? AND role IN ('user','assistant') "
-                  "AND content IS NOT NULL AND content != '' ORDER BY timestamp, id LIMIT 1", (session_id,))
-    return _one_line(r[0]["content"], 160) if r else ""
+    text = _first_content(db, session_id, "chat")
+    return _one_line(text, 160) if text else ""
 
 
 def _session_conv(profile: str, row: dict[str, Any], owners: dict[str, Optional[str]]) -> Optional[dict[str, Any]]:
@@ -743,12 +767,6 @@ def _plugin_version() -> str:
         return ""
     found = re.search(r"^version:\s*['\"]?([^'\"\s]+)", text, re.M)
     return found.group(1) if found else ""
-
-
-@router.get("/health")
-def health() -> dict[str, Any]:
-    """Cheap liveness + version probe: lets the page tell 'backend not reloaded yet' from real errors."""
-    return {"ok": True, "plugin": "agents-hub", "version": _plugin_version(), "agents": len(list_agents()), "time": time.time()}
 
 
 _IMG_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
@@ -1747,10 +1765,34 @@ def _read_json(path: Path, default: Any) -> Any:
         return default
 
 
+_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_WRITE_LOCKS_GUARD = threading.Lock()
+
+
 def _write_json(path: Path, data: Any) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    """Atomic JSON write that is safe under concurrent requests.
+
+    Each writer gets its own temp file (a shared ``.tmp`` name let one request replace or remove
+    another's mid-write), writers of the same file are serialized, and the final replace is retried
+    briefly because Windows refuses to replace a file another process (indexer, antivirus) has open.
+    """
+    with _WRITE_LOCKS_GUARD:
+        lock = _WRITE_LOCKS.setdefault(str(path), threading.Lock())
+    with lock:
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        for attempt in range(8):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 7:
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+                    raise
+                time.sleep(0.05 * (attempt + 1))
 
 
 # ─────────────────────── goals ───────────────────────

@@ -147,7 +147,9 @@ class AgentsHubTest(unittest.TestCase):
 
     # --- endpoints ---------------------------------------------------------
     def test_health(self):
-        self.assertEqual(self.get("/health").json(), {"ok": True, "version": "1"})
+        h = self.get("/health").json()  # through the router: a duplicate /health route would serve the old shape
+        self.assertEqual((h["ok"], h["version"]), (True, "1"))
+        self.assertRegex(h["plugin_version"], r"^\d+\.\d+\.\d+$")
 
     def test_agents(self):
         a = {x["id"]: x for x in self.get("/agents").json()["agents"]}
@@ -648,8 +650,37 @@ class TeamSetupUsageTest(unittest.TestCase):
     def test_health_reports_version(self):
         h = self.m.health()
         self.assertTrue(h["ok"])
-        self.assertRegex(h["version"], r"^\d+\.\d+\.\d+$")
+        self.assertRegex(h["plugin_version"], r"^\d+\.\d+\.\d+$")
         self.assertGreaterEqual(h["agents"], 1)
+
+    def test_concurrent_json_writes(self):
+        import threading as th
+        target = self.home / "agents-hub" / "race.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        errors = []
+
+        def w(i):
+            try:
+                for k in range(20):
+                    self.m._write_json(target, {"writer": i, "k": k})
+            except Exception as exc:  # noqa: BLE001
+                errors.append(repr(exc))
+
+        ts = [th.Thread(target=w, args=(i,)) for i in range(8)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        self.assertEqual(errors, [])
+        self.assertIn("writer", json.loads(target.read_text(encoding="utf-8")))
+        self.assertEqual([p.name for p in target.parent.glob("race.json.*.tmp")], [])
+
+    def test_routes_are_unique(self):
+        # FastAPI serves the FIRST route registered for a path: a duplicate silently never runs.
+        seen = {}
+        for r in self.m.router.routes:
+            for meth in sorted(getattr(r, "methods", None) or []):
+                key = (meth, r.path)
+                self.assertNotIn(key, seen, f"duplicate route {key}")
+                seen[key] = r
 
     def test_staged_image_only_from_agent_cache(self):
         imgs = self.home / "cache" / "images"

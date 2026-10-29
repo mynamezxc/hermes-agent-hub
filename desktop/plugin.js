@@ -27,14 +27,14 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.8'
+const PLUGIN_VERSION = '1.6.9'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
   const t = String(err || '')
 
   if (/\b404\b|not found/i.test(t)) {
-    return { kind: 'missing', title: 'The Agents Hub backend is not loaded', hint: 'Restart the gateway once after installing or updating (Ctrl+K, "Restart gateway"), and check that agents-hub is enabled for the agent (hermes plugins list).' }
+    return { kind: 'missing', title: 'The Agents Hub backend is not loaded', hint: 'Restart the gateway once after installing or updating (Ctrl+K, "Restart gateway"), and check that agents-hub is enabled for the default profile (hermes -p default plugins list).' }
   }
 
   if (/gateway inaccessible|runtime_exited|failed to fetch|econnrefused|econnreset|network ?error|socket hang up|timed out|503|502|504/i.test(t)) {
@@ -264,6 +264,19 @@ const baseOf = p => String(p).slice(String(p).lastIndexOf('/') + 1)
 /* ───────────────────────── store (module level, set up in register) ───────────────────────── */
 
 let C = null
+
+const HUB_PROFILE = 'default'
+
+function withHubProfile(path) {
+  const p = String(path || '')
+
+  if (/[?&]profile=/.test(p)) {
+    return p
+  }
+
+  return `${p}${p.includes('?') ? '&' : '?'}profile=${HUB_PROFILE}`
+}
+
 let S = null
 let inflight = null
 const listeners = new Set()
@@ -434,7 +447,8 @@ function scheduleRetry() {
 async function checkHealth() {
   try {
     const h = await withTimeout(C.rest('/health'), 8000)
-    S.health = { at: Date.now(), version: (h && h.version) || '', ok: true }
+    // plugin_version arrived with 1.6.8; an older backend only reports its API version.
+    S.health = { at: Date.now(), version: (h && h.plugin_version) || '', ok: true, old: !(h && h.plugin_version) }
   } catch (err) {
     S.health = { at: Date.now(), version: '', ok: false, old: /\b404\b|not found/i.test(errText(err)) }
   }
@@ -453,7 +467,7 @@ function backendStale(s) {
     return `The page is Agents Hub ${PLUGIN_VERSION} but the gateway still runs backend ${hl.version}.`
   }
 
-  if (!hl.ok && hl.old) {
+  if (hl.old) {
     return `The page is Agents Hub ${PLUGIN_VERSION} but the gateway still runs an older backend.`
   }
 
@@ -6298,7 +6312,14 @@ function HubPage() {
   useEffect(() => {
     void load()
     void fetchCommands()
-    const stop = C ? C.setInterval(() => void load(), POLL_MS) : null
+    // Refresh only while the Hub is on screen; a hidden window keeps the gateway quiet.
+    const stop = C
+      ? C.setInterval(() => {
+          if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
+            void load()
+          }
+        }, POLL_MS)
+      : null
     // Running commands of every agent: one shared, cheap poll (rail badges + the right bar).
     const stopCmds = C
       ? C.setInterval(() => {
@@ -7933,7 +7954,12 @@ export default {
   id: PLUGIN_ID,
   name: 'Agents Hub',
   register(ctx) {
-    C = ctx
+    // Every Hub request is pinned to the profile the plugin is enabled in. Desktop otherwise scopes
+    // plugin REST calls to whichever profile is active in the sidebar; when that is another agent
+    // (marketing, process, ...) the gateway's consent gate answers 404 "Plugin not found" and the Hub
+    // looked disconnected. The Hub reads the whole team from the root home, so 'default' is right.
+    C = Object.create(ctx)
+    C.rest = (path, opts) => ctx.rest(withHubProfile(path), opts)
     S = initialState(ctx.storage.get('ui', null))
     inflight = null
     listeners.clear()
