@@ -1541,6 +1541,123 @@ const ATT_VISIBLE = 10
 const MAX_ATTACH_BYTES = 25 * 1024 * 1024
 const draftAtt = {}
 
+const normText = v => String(v || '').replace(/\s+/g, ' ').trim()
+
+// Hermes stores a sent message as text only: the image the owner attached is staged under the agent's
+// cache/images/ but not recorded on the row. The Hub remembers which saved message carried which images
+// (paths only, in plugin storage) and shows them again: from memory right after sending, through
+// GET /image after a reload.
+const SENT_ATT_KEY = 'sentAttachments'
+const SENT_ATT_MAX = 300
+const attData = {}
+let sentAtt = null
+
+function sentAttMap() {
+  if (!sentAtt) {
+    const v = C && C.storage ? C.storage.get(SENT_ATT_KEY, null) : null
+    sentAtt = v && typeof v === 'object' ? v : {}
+  }
+
+  return sentAtt
+}
+
+function bindSentAttachments(agent, messageId, atts) {
+  const key = `${agent}:${messageId}`
+  const map = sentAttMap()
+
+  if (map[key] || !Array.isArray(atts) || atts.length === 0) {
+    return
+  }
+
+  map[key] = atts.map(a => ({ name: a.name, kind: a.kind, size: a.size || 0, path: a.stagedPath || a.path || null }))
+  atts.forEach((a, i) => {
+    if (a.dataUrl) {
+      attData[`${key}:${i}`] = a.dataUrl
+    }
+  })
+  const keys = Object.keys(map)
+
+  if (keys.length > SENT_ATT_MAX) {
+    keys.slice(0, keys.length - SENT_ATT_MAX).forEach(k => delete map[k])
+  }
+
+  try {
+    C.storage.set(SENT_ATT_KEY, map)
+  } catch {
+    /* storage full or unavailable: memory still holds this session */
+  }
+}
+
+function withSentAttachments(agent, m) {
+  if (!m || m.role !== 'user' || (Array.isArray(m.attachments) && m.attachments.length)) {
+    return m
+  }
+
+  const key = `${agent}:${m.id}`
+  const list = sentAttMap()[key]
+
+  return list ? { ...m, attachments: list.map((a, i) => ({ ...a, agent, dataUrl: attData[`${key}:${i}`] || null })) } : m
+}
+
+async function loadStagedImage(agent, path) {
+  const key = `img:${agent}:${path}`
+
+  if (attData[key] !== undefined) {
+    return attData[key]
+  }
+
+  attData[key] = null
+
+  try {
+    const r = await C.rest(`/image?agent=${encodeURIComponent(agent)}&path=${encodeURIComponent(path)}`)
+    attData[key] = (r && r.data_url) || false
+  } catch {
+    attData[key] = false
+  }
+
+  return attData[key]
+}
+
+// The saved row of a given send: newer than the send and, when there was text, carrying that text, so a
+// message sent a moment earlier is never mistaken for it.
+function isSavedRowOf(it, content, sentAt) {
+  const want = normText(content).slice(0, 60)
+
+  return it.type === 'message' && it.role === 'user' && !it.auto && Number(it.timestamp) >= num(sentAt) - 2 && (!want || normText(it.content).includes(want))
+}
+
+// Sends with attachments still waiting for their saved row. Kept apart from the pending bubble, which is
+// cleared when the turn ends, often before the saved row has been fetched.
+let pendingAtt = []
+
+function rememberSentAttachments(agent, content, sentAt, atts) {
+  if (Array.isArray(atts) && atts.length) {
+    pendingAtt = [...pendingAtt.filter(p => Date.now() / 1000 - p.sentAt < 3600), { agent, content, sentAt, atts }]
+  }
+}
+
+function bindPendingAttachments(agent, items) {
+  if (!pendingAtt.length) {
+    return
+  }
+
+  pendingAtt = pendingAtt.filter(p => {
+    if (p.agent !== agent) {
+      return true
+    }
+
+    const saved = items.find(it => isSavedRowOf(it, p.content, p.sentAt) && !sentAttMap()[`${agent}:${it.id}`])
+
+    if (saved) {
+      bindSentAttachments(agent, saved.id, p.atts)
+
+      return false
+    }
+
+    return true
+  })
+}
+
 async function stageAttachments(agent, runtime, atts) {
   const refs = []
 
@@ -1550,6 +1667,10 @@ async function stageAttachments(agent, runtime, atts) {
 
       if (r && r.attached === false) {
         throw new Error(r.message || `Could not attach ${att.name}`)
+      }
+
+      if (r && typeof r.path === 'string') {
+        att.stagedPath = r.path
       }
     } else {
       const r = await rp(agent, 'file.attach', { session_id: runtime, name: att.name, data_url: att.dataUrl })
@@ -1614,6 +1735,7 @@ async function sendMessage(agent, text, attachments = [], { display, truncateRow
     setSend(agent, { runtime, phase: atts.length ? 'upload' : 'send' })
 
     const refs = atts.length ? await stageAttachments(agent, runtime, atts) : []
+    rememberSentAttachments(agent, shown, sentAt, atts)
     const images = atts.some(a => a.kind === 'image')
     const prompt = [refs.join('\n'), body].filter(Boolean).join('\n\n') || (images ? 'Please look at the attached image(s).' : '')
 
@@ -3432,10 +3554,30 @@ function attIcon(att) {
 }
 
 function AttachmentChip({ att, onRemove }) {
+  const [loaded, setLoaded] = useState(null)
+  const src = att.dataUrl || loaded
+
+  useEffect(() => {
+    if (att.kind !== 'image' || att.dataUrl || !att.path || !att.agent || !C) {
+      return undefined
+    }
+
+    let live = true
+    void loadStagedImage(att.agent, att.path).then(url => {
+      if (live && url) {
+        setLoaded(url)
+      }
+    })
+
+    return () => {
+      live = false
+    }
+  }, [att.agent, att.path, att.dataUrl])
+
   return h(
     'span',
     { className: cx('ah-att', att.kind === 'image' && 'is-image'), title: `${att.name} (${fmtBytes(att.size || 0)})` },
-    att.kind === 'image' && att.dataUrl ? h('img', { className: 'ah-att-thumb', src: att.dataUrl, alt: '' }) : h('span', { className: 'ah-att-icon' }, h(Icon, { name: attIcon(att), size: 16 })),
+    att.kind === 'image' && src ? h('img', { className: 'ah-att-thumb', src, alt: '' }) : h('span', { className: 'ah-att-icon' }, h(Icon, { name: attIcon(att), size: 16 })),
     h('span', { className: 'ah-att-body' }, h('span', { className: 'ah-att-name' }, att.name), att.size ? h('span', { className: 'ah-att-size' }, fmtBytes(att.size)) : null),
     onRemove ? h('button', { type: 'button', className: 'ah-att-x ah-state', 'aria-label': `Drop ${att.name}`, title: 'Remove this file', onClick: onRemove }, h(Icon, { name: 'close', size: 14 })) : null
   )
@@ -4597,6 +4739,7 @@ function ChatView({ s }) {
 
   const entries = useMemo(() => {
     const items = tl ? [...tl.older, ...tl.latest] : []
+    bindPendingAttachments(agent, items)
     const seen = new Set()
     const out = []
     const hideFrom = turnLive ? turnStart - 1 : null
@@ -4620,7 +4763,7 @@ function ChatView({ s }) {
           continue
         }
 
-        out.push({ kind: 'msg', m: it })
+        out.push({ kind: 'msg', m: withSentAttachments(agent, it) })
       }
     }
 
@@ -4640,9 +4783,9 @@ function ChatView({ s }) {
     }
 
     for (const m of send.optimistic || []) {
-      const matched = items.some(it => it.type === 'message' && it.role === 'user' && !it.auto && Number(it.timestamp) >= num(send.sentAt) - 2)
+      const saved = items.find(it => isSavedRowOf(it, m.content, send.sentAt))
 
-      if (!matched) {
+      if (!saved) {
         out.push({ kind: 'msg', m: { ...m, optimistic: true } })
       }
     }

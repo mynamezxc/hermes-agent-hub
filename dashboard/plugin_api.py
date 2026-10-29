@@ -736,6 +736,34 @@ def _messages_session(profile: str, session_id: str, limit: int, owner: str,
     return [_shape_message(r, profile, owner) for r in rows]
 
 
+_IMG_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+_IMG_MAX_BYTES = 12 * 1024 * 1024
+
+
+@router.get("/image")
+def staged_image(agent: str, path: str) -> dict[str, Any]:
+    """An image the owner attached from the Hub, for showing it again in the chat.
+
+    Only files Hermes staged for that agent (``<agent home>/cache/images/``) are served; anything else is 404.
+    """
+    if agent not in list_agents():
+        raise HTTPException(404, "unknown agent")
+    try:
+        root = (agent_home(agent) / "cache" / "images").resolve()
+        target = Path(path).resolve()
+        target.relative_to(root)
+    except (OSError, ValueError):
+        raise HTTPException(404, "not a staged image")
+    mime = _IMG_MIME.get(target.suffix.lower())
+    if not mime or not target.is_file():
+        raise HTTPException(404, "not a staged image")
+    data = target.read_bytes()
+    if len(data) > _IMG_MAX_BYTES:
+        raise HTTPException(413, "image too large")
+    import base64
+    return {"name": target.name, "data_url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"}
+
+
 @router.get("/conversations/{profile}/{session_id}")
 def conversation_detail(profile: str, session_id: str, limit: int = Query(200, ge=1, le=1000)) -> dict[str, Any]:
     if profile == "kanban":

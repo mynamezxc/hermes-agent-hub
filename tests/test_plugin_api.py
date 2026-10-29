@@ -640,6 +640,21 @@ class TeamSetupUsageTest(unittest.TestCase):
         self.assertFalse(any(a.startswith(".") for a in self.m.load_team()))
         self.assertIn("writer", self.m.list_agents())
 
+    def test_staged_image_only_from_agent_cache(self):
+        imgs = self.home / "cache" / "images"
+        imgs.mkdir(parents=True)
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+        (imgs / "upload_abc.png").write_bytes(png)
+        r = self.m.staged_image("default", str(imgs / "upload_abc.png"))
+        self.assertTrue(r["data_url"].startswith("data:image/png;base64,"))
+        outside = self.home / "secret.png"
+        outside.write_bytes(png)
+        for bad in (str(outside), str(imgs / ".." / ".." / "secret.png"), str(self.home / "config.yaml"), str(imgs / "missing.png")):
+            with self.assertRaises(self.m.HTTPException):
+                self.m.staged_image("default", bad)
+        with self.assertRaises(self.m.HTTPException):
+            self.m.staged_image("nobody", str(imgs / "upload_abc.png"))
+
     def test_first_run_setup_builds_roster(self):
         state = self.m.ensure_setup()
         self.assertEqual(state["version"], self.m.SETUP_VERSION)

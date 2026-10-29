@@ -1,5 +1,5 @@
 name: agents-hub
-version: 1.6.5
+version: 1.6.6
 description: "Agents Hub: a Hermes Desktop page to chat with, steer and coordinate every profile: goals, file changes with rollback, permission requests, running commands, team roster, accounts and usage."
 author: mynamezxc
 requires_hermes: ">=0.22.5"
