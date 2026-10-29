@@ -798,8 +798,13 @@ def staged_image(agent: str, path: str) -> dict[str, Any]:
     return {"name": target.name, "data_url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"}
 
 
-@router.get("/conversations/{profile}/{session_id}")
-def conversation_detail(profile: str, session_id: str, limit: int = Query(200, ge=1, le=1000)) -> dict[str, Any]:
+@router.get("/conversations/{owner}/{session_id}")
+def conversation_detail(owner: str, session_id: str, limit: int = Query(200, ge=1, le=1000)) -> dict[str, Any]:
+    # The path segment is deliberately NOT named ``profile``: Hermes binds a route's ``profile`` path
+    # parameter as the request's profile scope (it wins over ``?profile=default``), so every detail read
+    # for another agent ran in that profile, where Agents Hub is not enabled -> 404 "Plugin not found"
+    # ("Conversation not found" on View all); ``kanban`` was answered "Profile 'kanban' does not exist".
+    profile = owner
     if profile == "kanban":
         meta = next((c for c in _kanban_convs() if c["session_id"] == session_id), None)
         if not meta:

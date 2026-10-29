@@ -564,6 +564,16 @@ class V2Test(unittest.TestCase):
         d = self.get("/agents/sales/timeline").json()
         self.assertEqual((d["items"], d["has_more"], d["next_before"]), ([], False, None))
 
+    def test_no_route_path_param_named_profile(self):
+        # Hermes binds a route's `profile` path parameter as the request's profile scope, overriding
+        # ?profile=default: /conversations/{profile}/... ran in the target agent's profile, where the Hub
+        # is not enabled, so "View all" on every agent-to-agent message answered 404 "Plugin not found".
+        import re as _re
+        bad = [r.path for r in self.m.router.routes if _re.search(r"\{profile(:[^}]*)?\}", getattr(r, "path", ""))]
+        self.assertEqual(bad, [])
+        d = self.get("/conversations/marketing/x1").json()
+        self.assertEqual(d["meta"]["profile"], "marketing")
+
     def test_timeline_keeps_long_lived_bot_chat(self):
         # Field report: a Bot Chat started weeks ago fell out of the 60-session window once newer
         # cron/tool sessions piled up, so the owner's whole chat vanished after every refresh.

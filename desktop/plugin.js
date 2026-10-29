@@ -27,7 +27,7 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.11'
+const PLUGIN_VERSION = '1.6.12'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
