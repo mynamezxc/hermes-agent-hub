@@ -1,9 +1,9 @@
 {
   "name": "agents-hub",
   "label": "Agents Hub",
-  "description": "Backend for the Agents Hub desktop page: agents, chat timelines, goals, running commands, permission requests, schedules, tasks and git changes.",
+  "description": "Agents Hub: chat with and coordinate every Hermes profile — agents with moods, goals, file changes with rollback, permission requests, running commands, schedules, team roster, provider logins and usage.",
   "icon": "Users",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "tab": {
     "hidden": true
   },

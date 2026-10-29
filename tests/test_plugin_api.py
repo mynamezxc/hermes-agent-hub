@@ -84,6 +84,10 @@ class AgentsHubTest(unittest.TestCase):
         (home / "profiles" / "dev-backend").mkdir(parents=True)
         (home / "profiles" / "newbie").mkdir(parents=True)
         (home / "config.yaml").write_text("model:\n  # c\n  default: \"claude-opus-5-5\"\n  provider: anthropic\n")
+        (home / "agents-hub").mkdir(parents=True, exist_ok=True)
+        (home / "agents-hub" / "team.json").write_text(json.dumps({"version": 1, "agents": {
+            "default": {"name": "CEO Hermes", "role": "Điều phối", "reports_to": "Owner", "avatar": "default"},
+            "dev-backend": {"name": "Dev Backend", "role": "Lập trình backend", "reports_to": "tech-lead", "avatar": "dev-backend"}}}))
         (home / "profiles" / "dev-backend" / "config.yaml").write_text("model:\n  default: claude-sonnet-5-5\n")
         sess = ("INSERT INTO sessions (id, source, started_at, ended_at, end_reason, parent_session_id, "
                 "message_count, input_tokens, output_tokens, display_name) VALUES (?,?,?,?,?,?,?,?,?,?)")
@@ -156,7 +160,12 @@ class AgentsHubTest(unittest.TestCase):
         self.assertEqual(a["dev-backend"]["status"], "idle")
         self.assertEqual(a["dev-backend"]["sessions_total"], 2)
         self.assertEqual(a["newbie"]["role"], "Agent")
-        self.assertEqual(a["newbie"]["name"], "newbie")
+        self.assertEqual(a["newbie"]["name"], "Newbie")  # generated roster entry for a new profile
+        self.assertRegex(a["newbie"]["avatar"], r"^[0-9a-f]{8}$")  # random avatar seed
+        self.assertEqual(a["dev-backend"]["avatar"], "dev-backend")  # existing entries are kept as edited
+        team = json.loads((FIX / "home" / "agents-hub" / "team.json").read_text(encoding="utf-8"))["agents"]
+        self.assertEqual(set(team), {"default", "dev-backend", "newbie"})
+        self.assertIn("`newbie`", (FIX / "home" / "agents-hub" / "TEAM.md").read_text(encoding="utf-8"))
         self.assertEqual(a["dev-backend"]["name"], "Dev Backend")
         self.assertEqual(a["default"]["name"], "CEO Hermes")
         self.assertEqual(a["newbie"]["reports_to"], "default")
@@ -605,6 +614,115 @@ class AutoMessageTest(unittest.TestCase):
         plain = self.m._shape_message({**row, "content": "chào", "display_kind": None, "display_metadata": None}, "default", "owner")
         self.assertNotIn("auto", plain)
 
+
+class TeamSetupUsageTest(unittest.TestCase):
+    """Team roster + first-run setup, usage cache (never blocks, keeps last good numbers), login guards."""
+
+    def setUp(self):
+        root = FIX / "team"
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+        home = root / "home"
+        (home / "profiles" / "writer").mkdir(parents=True)
+        (home / "profiles" / "writer" / "profile.yaml").write_text("display_name: Nhà văn\ndescription: Viết bài SEO và social\n", encoding="utf-8")
+        (home / "config.yaml").write_text("model:\n  default: m\n  provider: anthropic\n", encoding="utf-8")
+        os.environ["HERMES_HOME"] = str(home)
+        self.home = home
+        spec = importlib.util.spec_from_file_location("agents_hub_api_team", API)
+        self.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.m)
+
+    def test_first_run_setup_builds_roster(self):
+        state = self.m.ensure_setup()
+        self.assertEqual(state["version"], self.m.SETUP_VERSION)
+        team = self.m.load_team()
+        self.assertEqual(team["writer"]["name"], "Nhà văn")  # from profile.yaml
+        self.assertEqual(team["writer"]["role"], "Viết bài SEO và social")
+        self.assertEqual(team["writer"]["reports_to"], "default")
+        self.assertEqual(team["default"]["reports_to"], "Owner")
+        self.assertNotEqual(team["writer"]["avatar"], team["default"]["avatar"])
+        md = (self.home / "agents-hub" / "TEAM.md").read_text(encoding="utf-8")
+        self.assertIn("| `writer` | Nhà văn |", md)
+        # edits survive a re-run; avatar re-roll gives a new seed
+        old = team["writer"]["avatar"]
+        self.m.team_update("writer", {"role": "Content lead", "avatar": "random"})
+        self.m.ensure_setup(force=True)
+        team = self.m.load_team()
+        self.assertEqual(team["writer"]["role"], "Content lead")
+        self.assertNotEqual(team["writer"]["avatar"], old)
+        cards = {a["id"]: a for a in self.m.agents()["agents"]}
+        self.assertEqual((cards["writer"]["name"], cards["writer"]["role"]), ("Nhà văn", "Content lead"))
+        self.assertEqual(cards["writer"]["avatar"], team["writer"]["avatar"])
+
+    def test_create_agent_validates(self):
+        from fastapi import HTTPException
+        for bad in ("", "Bad Name", "default", "x" * 60, "../up"):
+            with self.assertRaises(HTTPException):
+                self.m.team_create({"id": bad, "role": "r"})
+        with self.assertRaises(HTTPException):
+            self.m.team_create({"id": "writer", "role": "r"})  # exists
+
+    def test_usage_cache_never_blocks_and_keeps_last_good(self):
+        calls = []
+        good = {"status": {"logged_in": True}, "usage": {"windows": [{"label": "Session", "used_percent": 10}]}}
+
+        def fake(agent, provider):
+            calls.append(provider)
+            if len(calls) > 2:
+                raise RuntimeError("network down")
+            return good
+
+        self.m._fetch_usage_sync = fake
+        r = self.m.usage("default", wait=5)
+        self.assertEqual([p["usage"]["windows"][0]["used_percent"] for p in r["providers"]], [10, 10])
+        self.assertEqual(len(calls), 2)
+        r = self.m.usage("default", wait=5)  # fresh: served from cache
+        self.assertEqual(len(calls), 2)
+        for k in list(self.m._usage_cache):  # make it stale -> refresh fails -> last numbers stay
+            self.m._usage_cache[k]["at"] -= self.m.USAGE_TTL_S + 1
+        r = self.m.usage("default", wait=5)
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all(p["usage"] and p["error"] for p in r["providers"]))
+        self.m.usage("default", wait=5)  # cooling down after a failure: no new fetch
+        self.assertEqual(len(calls), 4)
+
+    def test_usage_answers_immediately_while_loading(self):
+        import threading
+        gate = threading.Event()
+
+        def slow(agent, provider):
+            gate.wait(5)
+            return {"status": {"logged_in": True}, "usage": None}
+
+        self.m._fetch_usage_sync = slow
+        t = time.time()
+        r = self.m.usage("default", wait=0)
+        self.assertLess(time.time() - t, 1.0)
+        self.assertTrue(all(p["loading"] for p in r["providers"]))
+        gate.set()
+
+    def test_status_is_scrubbed(self):
+        st = self.m._clean_status({"logged_in": True, "token_preview": "sk-a...", "access_token": "x" * 40,
+                                   "expires_at": 1793269939568, "last_refresh": "2026-10-21T08:05:15Z"})
+        self.assertNotIn("token_preview", st)
+        self.assertNotIn("access_token", st)
+        self.assertAlmostEqual(st["expires_at_s"], 1793269939.568, places=2)
+        self.assertGreater(st["last_refresh_s"], 1.7e9)
+
+    def test_login_code_guard(self):
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException):
+            self.m.provider_login_code("nope", {"code": "abc"})
+        self.m._logins["s1"] = {"kind": "cli", "proc": None}
+        with self.assertRaises(HTTPException):
+            self.m.provider_login_code("s1", {"code": "a\nb"})
+
+    def test_plugin_skills_listed(self):
+        names = [s["name"] for s in self.m._plugin_skills()]
+        self.assertIn("agents-hub:hub-operating", names)
+        self.assertIn("agents-hub:team-coordination", names)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
@@ -985,4 +1103,3 @@ class RunningCommandsTest(unittest.TestCase):
         only = self.m.running_commands("dev-frontend")
         self.assertEqual([i["id"] for i in only["items"]], ["fg:dev-frontend:c1"])
         self.assertTrue(all(not k.startswith("_") for i in r["items"] for k in i))
-

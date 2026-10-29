@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import asyncio
 import json
 import os
 import re
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -24,7 +26,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 router = APIRouter()
 
@@ -36,33 +38,7 @@ MAX_DIFF_BYTES = 200 * 1024
 MAX_CONTENT_CHARS = 4000
 DEFAULT_EXTRA_REPOS: list[str] = [p for p in os.environ.get("AGENTS_HUB_EXTRA_REPOS", "").split(os.pathsep) if p]
 
-ROSTER: dict[str, tuple[str, str]] = {
-    "default": ("CEO", "Owner"),
-    "manager": ("Delivery Manager", "default"),
-    "tech-lead": ("Technical Lead", "manager"),
-    "dev-frontend": ("Dev Frontend", "tech-lead"),
-    "dev-backend": ("Dev Backend", "tech-lead"),
-    "dev-fullstack": ("Dev Fullstack", "tech-lead"),
-    "dev-platform": ("Dev Platform", "tech-lead"),
-    "marketing": ("Phòng Marketing", "default"),
-    "sales": ("Phòng Kinh doanh", "default"),
-    "customer-success": ("Phòng CS", "default"),
-    "process": ("Phòng Quy trình", "default"),
-}
 
-ROLE_DESC: dict[str, str] = {
-    "default": "CEO, báo cáo cho Owner",
-    "manager": "Quản lý giao hàng",
-    "tech-lead": "Trưởng nhóm kỹ thuật",
-    "dev-frontend": "Lập trình giao diện",
-    "dev-backend": "Lập trình backend",
-    "dev-fullstack": "Lập trình full-stack",
-    "dev-platform": "Lập trình nền tảng",
-    "marketing": "Nội dung và chiến dịch",
-    "sales": "Bán hàng và chăm sóc khách hàng tiềm năng",
-    "customer-success": "Hỗ trợ khách hàng",
-    "process": "Quy trình vận hành",
-}
 
 # ───────────────────────────── security helpers ──────────────────────────────
 
@@ -341,21 +317,13 @@ def _kanban_db() -> Path:
     return root_home() / "kanban.db"
 
 
-def _role(agent: str) -> tuple[str, str]:
-    """(display name, reports_to); unknown profiles show their id."""
-    if agent == "default":
-        return "CEO Hermes", "Owner"
-    label, boss = ROSTER.get(agent, (agent, "default"))
-    return label, boss
-
-
 # ───────────────────────────────── agents ────────────────────────────────────
 
 def _agent_card(agent: str, now: float) -> dict[str, Any]:
     home = agent_home(agent)
     db = _state_db(agent)
     name, reports_to = _role(agent)
-    role = ROLE_DESC.get(agent, "Agent")
+    role = _role_desc(agent)
     model, provider = _model_info(home)
     since = now - DAY_S
     stats = (query(db, "SELECT COUNT(*) AS n, MAX(started_at) AS last_started FROM sessions") or [{}])[0]
@@ -375,7 +343,7 @@ def _agent_card(agent: str, now: float) -> dict[str, Any]:
     agent_cfg = _load_cfg(home).get("agent")
     effort = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
     return {
-        "id": agent, "name": name, "role": role, "reports_to": reports_to,
+        "id": agent, "name": name, "role": role, "reports_to": reports_to, "avatar": _avatar_seed(agent),
         "model": model, "provider": provider, "reasoning_effort": effort if isinstance(effort, str) and effort else None,
         "status": status, "last_active_at": last_active,
         "sessions_total": int(stats.get("n") or 0), "sessions_24h": int(s24.get("n") or 0),
@@ -392,6 +360,10 @@ def health() -> dict[str, Any]:
 @router.get("/agents")
 def agents() -> dict[str, Any]:
     now = time.time()
+    try:
+        ensure_setup()  # first run on a fresh install: team roster, TEAM.md, avatars
+    except Exception:
+        pass
     return {"agents": [_agent_card(a, now) for a in list_agents()]}
 
 
@@ -2165,3 +2137,514 @@ def command_output(id: str = Query(...)) -> dict[str, Any]:
             text = it.get("_output") or _tail_file(it.get("_log") or "", MAX_CMD_OUTPUT)
             return {"id": id, "output": redact(text[-MAX_CMD_OUTPUT:]), "running": True}
     return {"id": id, "output": "", "running": False}
+
+
+# ─────────────────────── team (names, roles, avatars) + first-run setup ───────────────────────
+# ``<root>/agents-hub/team.json`` is the Hub's team roster: one entry per profile with a display
+# name, role, who it reports to, what it is good at and an avatar seed. It is created on first use
+# from each profile's ``profile.yaml`` (display_name / description) and never overwritten after
+# that, so owners can edit it. ``TEAM.md`` next to it is the same roster for agents to read when
+# they coordinate work (regenerated whenever the roster changes).
+
+SETUP_VERSION = 2
+OWNER_LABEL = "Owner"
+
+
+def _team_path() -> Path:
+    return _hub_dir("") / "team.json"
+
+
+def _profile_meta(agent: str) -> dict[str, Any]:
+    try:
+        from hermes_cli.profiles import read_profile_meta
+        meta = read_profile_meta(agent_home(agent))
+        return meta if isinstance(meta, dict) else {}
+    except Exception:
+        data = _mini_yaml((agent_home(agent) / "profile.yaml").read_text(encoding="utf-8")) \
+            if (agent_home(agent) / "profile.yaml").is_file() else {}
+        return data if isinstance(data, dict) else {}
+
+
+def _pretty_id(agent: str) -> str:
+    return " ".join(w.capitalize() for w in re.split(r"[-_]+", agent) if w) or agent
+
+
+def _new_team_entry(agent: str) -> dict[str, Any]:
+    meta = _profile_meta(agent)
+    desc = str(meta.get("description") or "").strip()
+    return {
+        "name": str(meta.get("display_name") or "").strip() or ("Hermes" if agent == "default" else _pretty_id(agent)),
+        "role": _clip(desc.split("\n")[0], 120) if desc else ("Điều phối" if agent == "default" else "Agent"),
+        "reports_to": OWNER_LABEL if agent == "default" else "default",
+        "capabilities": desc,
+        "avatar": secrets.token_hex(4),
+    }
+
+
+def load_team() -> dict[str, dict[str, Any]]:
+    data = _read_json(_team_path(), {})
+    agents = data.get("agents") if isinstance(data, dict) else None
+    return agents if isinstance(agents, dict) else {}
+
+
+def _save_team(team: dict[str, dict[str, Any]]) -> None:
+    _write_json(_team_path(), {"version": 1, "agents": team})
+    _write_team_md(team)
+
+
+def _write_team_md(team: dict[str, dict[str, Any]]) -> None:
+    lines = [
+        "# Team roster (Agents Hub)",
+        "",
+        "Generated by Agents Hub from `team.json` — edit the team in the Hub (tab Cấu hình) rather than here.",
+        "Hand work to the member whose role/capabilities fit; see the `agents-hub:team-coordination` skill.",
+        "",
+        "| id | name | role | reports to | model | good at |",
+        "|---|---|---|---|---|---|",
+    ]
+    for agent in list_agents():
+        e = team.get(agent) or {}
+        model, provider = _model_info(agent_home(agent))
+        cap = " ".join(str(e.get("capabilities") or "").split())
+        lines.append(f"| `{agent}` | {e.get('name') or agent} | {e.get('role') or ''} | {e.get('reports_to') or ''} | "
+                     f"{model or ''}{' (' + provider + ')' if provider else ''} | {_clip(cap, 240)} |")
+    lines += ["", "Ask a member: `hermes -p <id> chat -Q --oneshot --source tool --query-file <prompt.md>` "
+                  "(the Hub shows it as a conversation between the two agents).", ""]
+    p = _hub_dir("") / "TEAM.md"
+    text = "\n".join(lines)
+    if not p.is_file() or p.read_text(encoding="utf-8") != text:
+        p.write_text(text, encoding="utf-8")
+
+
+def ensure_team() -> dict[str, dict[str, Any]]:
+    """Add roster entries for new profiles (random avatar); existing entries are left as edited."""
+    team = load_team()
+    agents = list_agents()
+    missing = [a for a in agents if a not in team]
+    if missing or not (_hub_dir("") / "TEAM.md").is_file():
+        for a in missing:
+            team[a] = _new_team_entry(a)
+        _save_team(team)
+    return team
+
+
+def ensure_setup(force: bool = False) -> dict[str, Any]:
+    """First-run (or forced) setup: team roster + TEAM.md + setup marker. Idempotent and cheap."""
+    marker = _hub_dir("") / "setup.json"
+    state = _read_json(marker, {})
+    team = ensure_team()
+    if force or state.get("version") != SETUP_VERSION:
+        _write_team_md(team)
+        state = {"version": SETUP_VERSION, "at": time.time(), "agents": len(team)}
+        _write_json(marker, state)
+    return state
+
+
+def _role(agent: str) -> tuple[str, str]:
+    """(display name, reports_to) from the team roster."""
+    e = load_team().get(agent) or {}
+    if not e:
+        e = _new_team_entry(agent)
+    return str(e.get("name") or agent), str(e.get("reports_to") or ("" if agent == "default" else "default"))
+
+
+def _role_desc(agent: str) -> str:
+    e = load_team().get(agent) or {}
+    return str(e.get("role") or "Agent")
+
+
+def _avatar_seed(agent: str) -> str:
+    e = load_team().get(agent) or {}
+    return str(e.get("avatar") or agent)
+
+
+TEAM_FIELDS = ("name", "role", "reports_to", "capabilities")
+AGENT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
+
+
+@router.get("/team")
+def team_get() -> dict[str, Any]:
+    state = ensure_setup()
+    team = load_team()
+    return {"agents": [{"id": a, **team.get(a, {})} for a in list_agents()], "setup": state,
+            "team_md": (_hub_dir("") / "TEAM.md").as_posix(), "skills": _plugin_skills()}
+
+
+@router.put("/team/{agent}")
+def team_update(agent: str, body: dict[str, Any]) -> dict[str, Any]:
+    _check_agent(agent)
+    team = ensure_team()
+    e = dict(team.get(agent) or _new_team_entry(agent))
+    for k in TEAM_FIELDS:
+        if isinstance(body.get(k), str):
+            e[k] = _clip(body[k].strip(), 2000 if k == "capabilities" else 120)
+    if body.get("avatar") == "random":
+        e["avatar"] = secrets.token_hex(4)
+    team[agent] = e
+    _save_team(team)
+    return {"id": agent, **e}
+
+
+SOUL_TEMPLATE = """# {name}
+
+Bạn là **{name}** (`{id}`) — {role}. Báo cáo cho: {reports_to}.
+
+## Nhiệm vụ và năng lực
+{capabilities}
+
+## Làm việc trong Agents Hub
+- Khi được nhắn qua Agents Hub, đọc skill `agents-hub:hub-operating` (một lần mỗi phiên) để biết cách đặt và cập nhật goal,
+  cách sửa file để Hub theo dõi được thay đổi, và cách xin phép khi lệnh cần duyệt.
+- Cần người khác trong nhóm: xem đội ngũ ở `{team_md}` và skill `agents-hub:team-coordination`.
+- Trả lời ngắn gọn, bằng ngôn ngữ người dùng đang dùng; nói rõ việc đã kiểm chứng, giả định và việc còn chờ.
+"""
+
+
+@router.post("/team")
+def team_create(body: dict[str, Any]) -> dict[str, Any]:
+    """Create a new agent (Hermes profile) with a role SOUL.md, roster entry and random avatar.
+
+    The new profile copies config/skills from ``clone_from`` (default: the root profile) so it can use
+    the same model login; its SOUL.md is then replaced by one written for the new role."""
+    agent = str(body.get("id") or "").strip().lower()
+    if not AGENT_ID_RE.match(agent) or agent == "default":
+        raise HTTPException(400, "id: chữ thường, số, '-' hoặc '_' (tối đa 48 ký tự)")
+    if agent in list_agents():
+        raise HTTPException(409, "agent đã tồn tại")
+    name = _clip(str(body.get("name") or "").strip(), 120) or _pretty_id(agent)
+    role = _clip(str(body.get("role") or "").strip(), 120) or "Agent"
+    caps = _clip(str(body.get("capabilities") or "").strip(), 2000)
+    boss = str(body.get("reports_to") or "default").strip() or "default"
+    source = str(body.get("clone_from") or "default").strip()
+    if source not in list_agents():
+        raise HTTPException(400, "clone_from không hợp lệ")
+    try:
+        from hermes_cli.profiles import create_profile, write_profile_meta
+    except Exception as e:  # running outside Hermes
+        raise HTTPException(500, f"không gọi được Hermes profiles: {e}")
+    try:
+        home = create_profile(agent, clone_from=source, clone_config=True, description=caps or role)
+        write_profile_meta(Path(home), display_name=name, description=caps or role)
+    except Exception as e:
+        raise HTTPException(400, f"tạo profile thất bại: {redact(str(e))}")
+    soul = SOUL_TEMPLATE.format(name=name, id=agent, role=role, reports_to=boss,
+                                capabilities=caps or "(chưa mô tả — hỏi người giao việc nếu không rõ phạm vi)",
+                                team_md=(_hub_dir("") / "TEAM.md").as_posix())
+    (Path(home) / "SOUL.md").write_text(soul, encoding="utf-8")
+    team = ensure_team()
+    team[agent] = {"name": name, "role": role, "reports_to": boss, "capabilities": caps, "avatar": secrets.token_hex(4)}
+    _save_team(team)
+    return {"id": agent, **team[agent], "home": Path(home).as_posix()}
+
+
+def _plugin_skills() -> list[dict[str, Any]]:
+    root = Path(__file__).resolve().parent.parent / "skills"
+    out = []
+    for d in sorted(root.glob("*/SKILL.md")) if root.is_dir() else []:
+        head = d.read_text(encoding="utf-8")[:600]
+        m = re.search(r"^description:\s*(.+)$", head, re.M)
+        out.append({"name": f"agents-hub:{d.parent.name}", "description": (m.group(1).strip().strip('"') if m else "")})
+    return out
+
+
+@router.post("/setup")
+def setup_run() -> dict[str, Any]:
+    state = ensure_setup(force=True)
+    return {"setup": state, "team_md": (_hub_dir("") / "TEAM.md").as_posix(), "skills": _plugin_skills()}
+
+
+# ─────────────────────── provider accounts (login + status) and usage ───────────────────────
+# Status and the Codex device-code login go through Hermes's own dashboard OAuth routes (the same
+# ones Settings → Accounts uses). Claude (Anthropic) login runs Hermes's own CLI command
+# ``hermes [-p <agent>] auth add anthropic`` and feeds it the code the owner pastes. Tokens never
+# leave Hermes: only status fields (logged in, expiry, refresh, source) and usage percentages are
+# returned; ``token_preview`` is dropped.
+
+HUB_PROVIDERS = ("openai-codex", "anthropic")
+PROVIDER_LABEL = {"openai-codex": "Codex", "anthropic": "Claude", "claude-code": "Claude Code", "nous": "Nous Portal"}
+USAGE_TTL_S = 10 * 60          # a fresh snapshot is reused this long (usage moves slowly)
+USAGE_RETRY_S = 90             # after a failed fetch, wait this long before trying again
+LOGIN_TTL_S = 15 * 60
+
+_usage_cache: dict[tuple[str, str], dict[str, Any]] = {}
+_usage_lock = __import__("threading").Lock()
+_logins: dict[str, dict[str, Any]] = {}
+
+
+def _profile_arg(agent: str) -> Optional[str]:
+    return None if agent == "default" else agent
+
+
+def _oauth_routes():
+    from hermes_cli.web_routers import oauth as r
+    return r
+
+
+def _epoch_s(v: Any) -> Optional[float]:
+    """Expiry/refresh stamps come as epoch s, epoch ms or ISO strings: normalize to epoch seconds."""
+    if isinstance(v, (int, float)) and v > 0:
+        return float(v) / 1000.0 if v > 1e11 else float(v)
+    if isinstance(v, str) and v.strip():
+        try:
+            return datetime.fromisoformat(v.strip().replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _clean_status(st: Any) -> dict[str, Any]:
+    st = st if isinstance(st, dict) else {}
+    keep = ("logged_in", "source", "source_label", "expires_at", "has_refresh_token", "last_refresh", "error")
+    out = {k: st.get(k) for k in keep if k in st}
+    if isinstance(out.get("source_label"), str):
+        out["source_label"] = redact(out["source_label"])
+    out["expires_at_s"] = _epoch_s(st.get("expires_at"))
+    out["last_refresh_s"] = _epoch_s(st.get("last_refresh"))
+    return out
+
+
+@router.get("/providers")
+async def providers(agent: str = Query("default")) -> dict[str, Any]:
+    _check_agent(agent)
+    try:
+        data = await _oauth_routes().list_oauth_providers(profile=_profile_arg(agent))
+    except Exception as e:
+        raise HTTPException(502, f"không đọc được trạng thái đăng nhập: {redact(str(e))}")
+    rows = []
+    for p in data.get("providers") or []:
+        rows.append({"id": p.get("id"), "name": p.get("name"), "flow": p.get("flow"),
+                     "cli_command": p.get("cli_command"), "hub": p.get("id") in HUB_PROVIDERS,
+                     "label": PROVIDER_LABEL.get(p.get("id"), p.get("name")), "status": _clean_status(p.get("status"))})
+    rows.sort(key=lambda r: (not r["hub"], HUB_PROVIDERS.index(r["id"]) if r["hub"] else 0))
+    return {"agent": agent, "providers": rows}
+
+
+def _hermes_argv() -> list[str]:
+    exe = Path(sys.executable)
+    for cand in (exe.parent / "hermes.exe", exe.parent / "hermes"):
+        if cand.is_file():
+            return [str(cand)]
+    return [sys.executable, "-c", "from hermes_cli.main import main; main()"]
+
+
+_URL_RE = re.compile(r"https://\S+")
+
+
+def _gc_logins() -> None:
+    now = time.time()
+    for sid in [k for k, v in _logins.items() if now - v["started"] > LOGIN_TTL_S]:
+        proc = _logins[sid].get("proc")
+        if proc and proc.poll() is None:
+            proc.kill()
+        _logins.pop(sid, None)
+
+
+def _start_cli_login(agent: str, provider: str) -> dict[str, Any]:
+    import threading
+    argv = _hermes_argv() + ([] if agent == "default" else ["-p", agent]) + ["auth", "add", provider]
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1", "NO_COLOR": "1"}
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            env=env, creationflags=flags, text=True, encoding="utf-8", errors="replace", bufsize=1)
+    sid = secrets.token_urlsafe(12)
+    sess = {"id": sid, "agent": agent, "provider": provider, "kind": "cli", "proc": proc, "started": time.time(),
+            "lines": [], "url": None, "status": "pending", "needs_code": provider == "anthropic"}
+
+    def pump():
+        for line in proc.stdout:
+            text = line.rstrip()
+            if not sess["url"]:
+                m = _URL_RE.search(text)
+                if m and ("authorize" in m.group(0) or "oauth" in m.group(0) or "device" in m.group(0)):
+                    sess["url"] = m.group(0)
+            if text.strip():
+                sess["lines"].append(redact(text)[:400])
+                sess["lines"] = sess["lines"][-40:]
+        code = proc.wait()
+        sess["status"] = "approved" if code == 0 else "error"
+        sess["exit_code"] = code
+
+    threading.Thread(target=pump, daemon=True).start()
+    _logins[sid] = sess
+    return sess
+
+
+def _login_public(sess: dict[str, Any]) -> dict[str, Any]:
+    keep = ("id", "agent", "provider", "kind", "status", "url", "user_code", "verification_url", "needs_code",
+            "exit_code", "error", "expires_in")
+    out = {k: sess.get(k) for k in keep if sess.get(k) is not None}
+    out["log"] = sess.get("lines", [])[-12:]
+    return out
+
+
+@router.post("/providers/{provider}/login")
+async def provider_login(provider: str, request: Request, agent: str = Query("default")) -> dict[str, Any]:
+    """Start a login. Codex: Hermes's device-code flow (user code + verification link).
+    Claude: Hermes's ``auth add anthropic`` (authorize link, then the pasted code)."""
+    _check_agent(agent)
+    _gc_logins()
+    if provider == "anthropic":
+        sess = _start_cli_login(agent, provider)
+        for _ in range(40):  # the CLI prints the authorize link within a second or two
+            if sess["url"] or sess["status"] != "pending":
+                break
+            await asyncio.sleep(0.25)
+        return _login_public(sess)
+    try:
+        body = await _oauth_routes().start_oauth_login(provider, request, profile=_profile_arg(agent))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"không bắt đầu được đăng nhập: {redact(str(e))}")
+    sid = str(body.get("session_id") or "")
+    sess = {"id": sid, "agent": agent, "provider": provider, "kind": "device", "started": time.time(),
+            "status": "pending", "user_code": body.get("user_code"),
+            "verification_url": body.get("verification_url") or body.get("verification_uri"),
+            "expires_in": body.get("expires_in")}
+    _logins[sid] = sess
+    return _login_public(sess)
+
+
+@router.get("/providers/login/{sid}")
+async def provider_login_poll(sid: str) -> dict[str, Any]:
+    sess = _logins.get(sid)
+    if not sess:
+        raise HTTPException(404, "phiên đăng nhập không còn")
+    if sess["kind"] == "device" and sess["status"] == "pending":
+        try:
+            r = await _oauth_routes().poll_oauth_session(sess["provider"], sid, profile=_profile_arg(sess["agent"]), wait=0)
+            st = str((r or {}).get("status") or "pending")
+            sess["status"] = st if st in ("pending", "approved", "error", "expired", "denied", "cancelled") else st
+            if (r or {}).get("error_message") or (r or {}).get("error"):
+                sess["error"] = redact(str((r or {}).get("error_message") or (r or {}).get("error")))
+        except HTTPException as e:
+            sess["status"], sess["error"] = "error", str(e.detail)
+    if sess["status"] == "approved":
+        _usage_forget(sess["agent"], sess["provider"])
+    return _login_public(sess)
+
+
+@router.post("/providers/login/{sid}/code")
+def provider_login_code(sid: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Give the pasted authorization code to the waiting ``hermes auth add`` (never logged or stored)."""
+    sess = _logins.get(sid)
+    code = str(body.get("code") or "").strip()
+    if not sess or sess["kind"] != "cli":
+        raise HTTPException(404, "phiên đăng nhập không còn")
+    if not code or "\n" in code or len(code) > 2000:
+        raise HTTPException(400, "mã không hợp lệ")
+    proc = sess["proc"]
+    if proc.poll() is not None:
+        raise HTTPException(409, "lệnh đăng nhập đã kết thúc")
+    proc.stdin.write(code + "\n")
+    proc.stdin.flush()
+    sess["needs_code"] = False
+    return _login_public(sess)
+
+
+@router.delete("/providers/login/{sid}")
+def provider_login_cancel(sid: str) -> dict[str, Any]:
+    sess = _logins.pop(sid, None)
+    if sess and sess.get("proc") and sess["proc"].poll() is None:
+        sess["proc"].kill()
+    return {"ok": True}
+
+
+def _usage_forget(agent: str, provider: str) -> None:
+    with _usage_lock:
+        _usage_cache.pop((agent, provider), None)
+
+
+def _snapshot_dict(snap: Any) -> Optional[dict[str, Any]]:
+    if snap is None:
+        return None
+
+    def iso(d: Any) -> Optional[float]:
+        try:
+            return d.timestamp() if d else None
+        except Exception:
+            return None
+
+    return {
+        "plan": getattr(snap, "plan", None), "title": getattr(snap, "title", None),
+        "windows": [{"label": w.label, "used_percent": w.used_percent, "reset_at": iso(w.reset_at),
+                     "detail": w.detail, "scope": getattr(w, "scope", "account")} for w in (snap.windows or ())],
+        "details": [redact(d) for d in (snap.details or ())],
+        "unavailable": getattr(snap, "unavailable_reason", None),
+        "fetched_at": iso(getattr(snap, "fetched_at", None)),
+    }
+
+
+def _fetch_usage_sync(agent: str, provider: str) -> dict[str, Any]:
+    """One scoped read of login status + account usage (read-only: never refreshes a token)."""
+    from hermes_cli.web_routers._common import _profile_scope
+    with _profile_scope(_profile_arg(agent)):
+        r = _oauth_routes()
+        catalog = {p["id"]: p for p in r._build_oauth_catalog()}
+
+        def status_of(pid: str) -> dict[str, Any]:
+            entry = catalog.get(pid)
+            return _clean_status(r._resolve_provider_status(pid, entry.get("status_fn") if entry else None))
+
+        status = status_of(provider)
+        if provider == "anthropic" and not status.get("logged_in"):
+            # Hermes also uses an existing Claude Code login (~/.claude): report that one.
+            cc = status_of("claude-code")
+            if cc.get("logged_in"):
+                status = {**cc, "via": "claude-code"}
+        snap = None
+        if status.get("logged_in"):
+            from agent.account_usage import fetch_account_usage
+            snap = fetch_account_usage(provider, read_only=True)
+    return {"status": status, "usage": _snapshot_dict(snap)}
+
+
+def _refresh_usage(agent: str, provider: str) -> None:
+    key = (agent, provider)
+    try:
+        fresh = _fetch_usage_sync(agent, provider)
+        ok = fresh["usage"] is not None or not fresh["status"].get("logged_in")
+        with _usage_lock:
+            prev = _usage_cache.get(key) or {}
+            if ok:
+                _usage_cache[key] = {**fresh, "at": time.time(), "error": None, "busy": False}
+            else:  # keep the last good numbers; remember the failure
+                _usage_cache[key] = {**prev, "status": fresh["status"], "at": prev.get("at"), "failed_at": time.time(),
+                                     "error": "Không lấy được usage lúc này (giữ số liệu gần nhất).", "busy": False}
+    except Exception as e:
+        with _usage_lock:
+            prev = _usage_cache.get(key) or {}
+            _usage_cache[key] = {**prev, "failed_at": time.time(), "error": redact(str(e))[:200], "busy": False}
+
+
+@router.get("/usage")
+def usage(agent: str = Query("default"), wait: float = Query(0.0, ge=0, le=20)) -> dict[str, Any]:
+    """Claude + Codex usage for an agent's login. Answers from cache at once; a stale entry is
+    refreshed in the background (single flight per agent/provider), so the UI never blocks."""
+    import threading
+    _check_agent(agent)
+    now = time.time()
+    threads = []
+    for provider in HUB_PROVIDERS:
+        key = (agent, provider)
+        with _usage_lock:
+            c = _usage_cache.get(key) or {}
+            stale = not c.get("at") or now - c["at"] > USAGE_TTL_S
+            cooling = c.get("failed_at") and now - c["failed_at"] < USAGE_RETRY_S
+            start = stale and not cooling and not c.get("busy")
+            if start:
+                _usage_cache[key] = {**c, "busy": True}
+        if start:
+            t = threading.Thread(target=_refresh_usage, args=(agent, provider), daemon=True)
+            t.start()
+            threads.append(t)
+    for t in threads:
+        t.join(timeout=wait)
+    out = []
+    with _usage_lock:
+        for provider in HUB_PROVIDERS:
+            c = _usage_cache.get((agent, provider)) or {}
+            out.append({"id": provider, "label": PROVIDER_LABEL[provider], "status": c.get("status"),
+                        "usage": c.get("usage"), "updated_at": c.get("at"), "error": c.get("error"),
+                        "loading": bool(c.get("busy")) and not c.get("at")})
+    return {"agent": agent, "providers": out, "ttl": USAGE_TTL_S}

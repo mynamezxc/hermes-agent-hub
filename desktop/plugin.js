@@ -64,7 +64,8 @@ const TABS = [
   { id: 'conversations', label: 'Hội thoại', icon: 'comment-discussion' },
   { id: 'works', label: 'Schedules', icon: 'history' },
   { id: 'tasks', label: 'Tasks', icon: 'checklist' },
-  { id: 'changes', label: 'Thay đổi', icon: 'git-compare' }
+  { id: 'changes', label: 'Thay đổi', icon: 'git-compare' },
+  { id: 'config', label: 'Cấu hình', icon: 'settings-gear' }
 ]
 
 // With an agent selected the hub is a chat with that agent; without one it is the overview.
@@ -285,6 +286,9 @@ function initialState(saved) {
     approvals: {},
     commands: null,
     cmdOut: {},
+    usage: {},
+    providers: {},
+    team: null,
     preview: {},
     live: {},
     models: {},
@@ -408,6 +412,10 @@ function load() {
     })
   )
     .then(async () => {
+      if (!S.team) {
+        void fetchTeam() // roster path for the goals block; also runs first-run setup server-side
+      }
+
       S.refreshing = false
       S.fetchedAt = Date.now()
       S.now = Date.now()
@@ -1285,15 +1293,20 @@ function goalsBlock(agent) {
   const goals = ((d && d.goals) || []).filter(g => g.status === 'active')
   const lines = goals.length ? goals.map(g => `- ${g.id}${g.id === d.current ? ' (current)' : ''}: ${g.title}`).join('\n') : '- (none)'
 
+  const team = list('agents', 'agents').length > 1
+  const teamMd = (S.team && S.team.data && S.team.data.team_md) || '<HERMES_HOME>/agents-hub/TEAM.md'
+
   return [
     '<hub-goals>',
     'Active goals:',
     lines,
     'If this message sets, changes or completes objectives (or you finished one), end your reply with ONE line:',
     '<hub-goals-update>{"add":[{"title":"...","current":true}],"done":["g1"],"current":"g2","edit":[{"id":"g1","title":"..."}],"drop":["g3"]}</hub-goals-update>',
-    'Use only the keys you need, short titles in the user\'s language. Omit the line when nothing changes. Do not mention this block.',
+    'Use only the keys you need, short outcome titles in the user\'s language; mark done only with evidence. Omit the line when nothing changes. Do not mention this block.',
+    'Agents Hub: once per session load skill agents-hub:hub-operating. Edit files with write_file/patch (the owner reviews diffs and can roll back).',
+    team ? `Team roster: ${teamMd}; hand work to other members per skill agents-hub:team-coordination only when it needs them.` : null,
     '</hub-goals>'
-  ].join('\n')
+  ].filter(Boolean).join('\n')
 }
 
 const previewKey = (agent, path) => `${agent}::${path}`
@@ -1792,8 +1805,9 @@ const SKINS = ['#F6D3B3', '#EDB98A', '#D08B5B', '#AE5D29', '#F2C9A0', '#8D5524']
 const HAIRS = ['#2C1B12', '#4A2E1A', '#8A5A2B', '#D6A24A', '#1F1F2E', '#B5523B', '#6B6B78']
 
 // Deterministic face per agent id: skin, hair style/colour, glasses or headphones; expression = mood.
-function Face({ id, mood = 'waiting' }) {
-  const hsh = hashOf(id)
+function Face({ id, seed, mood = 'waiting' }) {
+  // seed: from the team roster (random for new agents, = id for older ones so faces stay put)
+  const hsh = hashOf(seed || avatarSeed(id))
   const skin = SKINS[hsh % SKINS.length]
   const hair = HAIRS[(hsh >>> 3) % HAIRS.length]
   const style = (hsh >>> 6) % 5
@@ -3883,7 +3897,8 @@ function Composer({ s, agent, onSent }) {
             h('span', { className: 'ah-composer-error-text' }, st.error),
             st.text || (st.attachments && st.attachments.length) ? h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => void sendMessage(agent, st.text, st.attachments || []) }, 'Thử lại') : null
           )
-        : null
+        : null,
+      h(UsageBar, { key: 'usage', s, agent })
     )
   )
 }
@@ -5955,6 +5970,8 @@ function HubPage() {
     body = h(Works, { s, v })
   } else if (tab === 'tasks') {
     body = h(Tasks, { s, v })
+  } else if (tab === 'config') {
+    body = h(ConfigTab, { s })
   } else {
     body = h(Changes, { s, v })
   }
@@ -5978,6 +5995,592 @@ function HubPage() {
         h('div', { key: tab, role: 'tabpanel', id: `ah-panel-${tab}`, 'aria-labelledby': `ah-tab-${tab}`, className: cx('ah-panel', (split || chat) && 'is-split', board && 'is-board', chat && 'is-chat'), tabIndex: -1 }, body)
       )
     )
+  )
+}
+
+/* ───────────────────────── accounts, usage, team (tab Cấu hình) ───────────────────────── */
+
+// Usage is cached by the gateway for 10 minutes; the bar asks every 5 and never blanks: the last
+// good numbers stay on screen while a refresh runs or if one fails.
+const USAGE_POLL_MS = 5 * 60 * 1000
+const USAGE_RETRY_MS = 6000
+const LOGIN_POLL_MS = 3000
+const HUB_PROVIDER_IDS = ['openai-codex', 'anthropic']
+
+function avatarSeed(id) {
+  const a = list('agents', 'agents').find(x => x.id === id)
+
+  return (a && a.avatar) || id || ''
+}
+
+function fmtClock(sec) {
+  if (!sec) {
+    return '—'
+  }
+
+  const d = new Date(sec * 1000)
+  const same = new Date().toDateString() === d.toDateString()
+  const hm = d.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
+
+  return same ? hm : `${hm} ${d.toLocaleDateString('vi-VN', { weekday: 'short', day: '2-digit', month: '2-digit' })}`
+}
+
+function untilText(sec, now) {
+  if (!sec) {
+    return ''
+  }
+
+  const left = sec - (now || Date.now()) / 1000
+
+  if (left <= 0) {
+    return 'đã tới hạn'
+  }
+
+  const d = Math.floor(left / 86400)
+  const hh = Math.floor((left % 86400) / 3600)
+  const mm = Math.max(1, Math.floor((left % 3600) / 60))
+
+  return d ? `${d} ngày ${hh} giờ` : hh ? `${hh} giờ ${mm} phút` : `${mm} phút`
+}
+
+const WINDOW_SHORT = { session: '5h', 'current session': '5h', weekly: 'tuần', 'current week': 'tuần', week: 'tuần' }
+
+function windowShort(label) {
+  const k = String(label || '').toLowerCase()
+
+  if (WINDOW_SHORT[k]) {
+    return WINDOW_SHORT[k]
+  }
+
+  if (/week/.test(k)) {
+    return /opus/.test(k) ? 'tuần·Opus' : /sonnet/.test(k) ? 'tuần·Sonnet' : 'tuần'
+  }
+
+  return /session|5h|hour/.test(k) ? '5h' : String(label || '')
+}
+
+function windowLong(label) {
+  const k = String(label || '').toLowerCase()
+
+  if (/session|5h/.test(k)) {
+    return 'Phiên 5 giờ'
+  }
+
+  if (/week/.test(k)) {
+    return /opus/.test(k) ? 'Tuần (Opus)' : /sonnet/.test(k) ? 'Tuần (Sonnet)' : 'Tuần'
+  }
+
+  return String(label || '')
+}
+
+const usageTone = pct => (pct >= 90 ? 'err' : pct >= 70 ? 'warn' : 'ok')
+
+async function fetchUsage(agent, wait = 0) {
+  if (!C || !agent) {
+    return
+  }
+
+  const prev = S.usage[agent]
+
+  try {
+    const data = await C.rest(`/usage?agent=${enc(agent)}&wait=${wait}`)
+
+    S.usage = { ...S.usage, [agent]: res('ready', data) }
+  } catch (err) {
+    S.usage = { ...S.usage, [agent]: res('error', prev ? prev.data : null, errText(err)) }
+  }
+
+  emit()
+}
+
+function UsageBar({ s, agent }) {
+  const u = s.usage[agent]
+  const rows = (u && u.data && u.data.providers) || []
+  const [now, setNow] = useState(Date.now())
+
+  useEffect(() => {
+    if (!C) {
+      return undefined
+    }
+
+    let stop = false
+    let timer = null
+    const tick = async (wait = 0) => {
+      await fetchUsage(agent, wait)
+
+      if (stop) {
+        return
+      }
+
+      const cur = S.usage[agent]
+      const busy = cur && cur.data && (cur.data.providers || []).some(p => p.loading)
+
+      // still loading: ask again soon; failed (offline / older gateway): back off to a minute
+      timer = setTimeout(() => void tick(0), busy ? USAGE_RETRY_MS : !cur || cur.status === 'error' ? 60000 : USAGE_POLL_MS)
+      setNow(Date.now())
+    }
+
+    void tick(8)
+
+    return () => {
+      stop = true
+      clearTimeout(timer)
+    }
+  }, [agent])
+
+  if (!u) {
+    return h('div', { className: 'ah-usage', 'aria-busy': 'true' }, h('span', { className: 'ah-usage-muted' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Đang lấy usage…'))
+  }
+
+  if (!rows.length) {
+    return u.status === 'error'
+      ? h('div', { className: 'ah-usage' }, h('span', { className: 'ah-usage-muted', title: u.error || '' }, 'Chưa lấy được usage — sẽ thử lại.'))
+      : null
+  }
+
+  return h(
+    'div',
+    { className: 'ah-usage', role: 'group', 'aria-label': 'Usage tài khoản model' },
+    rows.map(p => h(UsageChip, { key: p.id, p, now })),
+    u.status === 'error' ? h('span', { className: 'ah-usage-muted', title: u.error || '' }, h(Icon, { name: 'warning', size: 12 })) : null
+  )
+}
+
+function UsageChip({ p, now }) {
+  const st = p.status || {}
+  const wins = (p.usage && p.usage.windows) || []
+  const openConfig = () => setUi({ tab: 'config' })
+
+  if (!st.logged_in) {
+    if (p.loading) {
+      return h('span', { className: 'ah-usage-chip is-muted' }, h('b', null, p.label), h(Icon, { name: 'loading', size: 12, spinning: true }))
+    }
+
+    return h('button', { type: 'button', className: 'ah-usage-chip is-muted ah-state', onClick: openConfig, title: 'Chưa đăng nhập — mở tab Cấu hình' }, h('b', null, p.label), 'chưa đăng nhập')
+  }
+
+  const main = wins.slice(0, 2)
+  const worst = wins.reduce((m, w) => Math.max(m, Number(w.used_percent) || 0), 0)
+  const stale = p.updated_at && now / 1000 - p.updated_at > 30 * 60
+
+  return h(
+    'span',
+    { className: cx('ah-usage-chip', `is-${usageTone(worst)}`), tabIndex: 0, 'aria-label': `${p.label}: ${main.map(w => `${windowLong(w.label)} ${Math.round(w.used_percent)}%`).join(', ')}` },
+    h('b', null, p.label),
+    main.length
+      ? main.map((w, i) =>
+          h(
+            'span',
+            { key: i, className: 'ah-usage-win' },
+            h('span', { className: 'ah-usage-meter', 'aria-hidden': 'true' }, h('span', { className: `is-${usageTone(w.used_percent)}`, style: { width: `${Math.min(100, Math.max(2, w.used_percent))}%` } })),
+            `${Math.round(w.used_percent)}%`,
+            h('small', null, windowShort(w.label))
+          )
+        )
+      : h('small', null, p.loading ? '…' : (p.usage && p.usage.unavailable) || 'không có số liệu'),
+    stale || p.error ? h(Icon, { name: 'warning', size: 12, className: 'ah-usage-stale' }) : null,
+    h(UsagePop, { p, now })
+  )
+}
+
+function UsagePop({ p, now }) {
+  const st = p.status || {}
+  const us = p.usage || {}
+  const line = (k, v) => h('div', { className: 'ah-usage-line' }, h('span', null, k), h('span', null, v))
+
+  return h(
+    'span',
+    { className: 'ah-usage-pop', role: 'tooltip' },
+    h('strong', null, `${p.label}${us.plan ? ` · ${us.plan}` : ''}`),
+    (us.windows || []).map((w, i) =>
+      h(
+        'div',
+        { key: i, className: 'ah-usage-wrow' },
+        h('div', { className: 'ah-usage-line' }, h('span', null, windowLong(w.label)), h('b', null, `${Math.round(w.used_percent)}% đã dùng`)),
+        h('span', { className: 'ah-usage-meter is-wide' }, h('span', { className: `is-${usageTone(w.used_percent)}`, style: { width: `${Math.min(100, Math.max(2, w.used_percent))}%` } })),
+        w.reset_at ? h('small', null, `Reset ${fmtClock(w.reset_at)} (còn ${untilText(w.reset_at, now)})`) : null,
+        w.detail ? h('small', null, w.detail) : null
+      )
+    ),
+    (us.details || []).map((d, i) => h('small', { key: `d${i}` }, d)),
+    h('hr'),
+    line('Đăng nhập', st.via === 'claude-code' ? 'Claude Code' : st.source_label || st.source || '—'),
+    st.expires_at_s ? line('Token hết hạn', `${fmtClock(st.expires_at_s)} (${untilText(st.expires_at_s, now)})`) : null,
+    line('Tự làm mới token', st.has_refresh_token ? 'Có' : st.source && /pool|chatgpt|codex/.test(String(st.source)) ? 'Hermes tự quản' : 'Không'),
+    st.last_refresh_s ? line('Làm mới lần cuối', relTime(st.last_refresh_s, now)) : null,
+    line('Cập nhật usage', p.updated_at ? relTime(p.updated_at, now) : '—'),
+    p.error ? h('small', { className: 'ah-usage-err' }, p.error) : null
+  )
+}
+
+/* ── accounts (login + status) ── */
+
+async function fetchProviders(agent) {
+  try {
+    const data = await C.rest(`/providers?agent=${enc(agent)}`)
+
+    S.providers = { ...S.providers, [agent]: res('ready', data) }
+  } catch (err) {
+    const prev = S.providers[agent]
+
+    S.providers = { ...S.providers, [agent]: res('error', prev ? prev.data : null, errText(err)) }
+  }
+
+  emit()
+}
+
+async function fetchTeam() {
+  try {
+    const data = await C.rest('/team')
+
+    S.team = res('ready', data)
+  } catch (err) {
+    S.team = res('error', S.team ? S.team.data : null, errText(err))
+  }
+
+  emit()
+}
+
+function LoginPanel({ agent, provider, onDone }) {
+  const [sess, setSess] = useState(null)
+  const [err, setErr] = useState(null)
+  const [code, setCode] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let off = false
+
+    C.rest(`/providers/${enc(provider)}/login?agent=${enc(agent)}`, { method: 'POST', body: {} })
+      .then(d => !off && setSess(d))
+      .catch(e => !off && setErr(errText(e)))
+
+    return () => {
+      off = true
+    }
+  }, [agent, provider])
+
+  useEffect(() => {
+    if (!sess || sess.status !== 'pending') {
+      return undefined
+    }
+
+    const stop = C.setInterval(async () => {
+      try {
+        const d = await C.rest(`/providers/login/${enc(sess.id)}`)
+
+        setSess(d)
+
+        if (d.status === 'approved') {
+          onDone(true)
+        }
+      } catch (e) {
+        setErr(errText(e))
+      }
+    }, LOGIN_POLL_MS)
+
+    return stop
+  }, [sess && sess.id, sess && sess.status])
+
+  const cancel = () => {
+    if (sess && sess.status === 'pending') {
+      void C.rest(`/providers/login/${enc(sess.id)}`, { method: 'DELETE' }).catch(() => {})
+    }
+
+    onDone(false)
+  }
+
+  const sendCode = async e => {
+    e.preventDefault()
+
+    if (!code.trim()) {
+      return
+    }
+
+    setBusy(true)
+
+    try {
+      setSess(await C.rest(`/providers/login/${enc(sess.id)}/code`, { method: 'POST', body: { code: code.trim() } }))
+      setCode('')
+    } catch (e2) {
+      setErr(errText(e2))
+    }
+
+    setBusy(false)
+  }
+
+  const link = sess && (sess.verification_url || sess.url)
+
+  return h(
+    'div',
+    { className: 'ah-login' },
+    !sess && !err ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Đang mở luồng đăng nhập của Hermes…') : null,
+    sess && sess.user_code
+      ? h(
+          'div',
+          { className: 'ah-login-step' },
+          h('span', null, '1. Mở trang xác nhận và nhập mã:'),
+          h('code', { className: 'ah-login-code' }, sess.user_code),
+          h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => navigator.clipboard && navigator.clipboard.writeText(sess.user_code) }, h(Icon, { name: 'copy', size: 14 }), ' Chép mã')
+        )
+      : null,
+    link
+      ? h('div', { className: 'ah-login-step' }, h('a', { className: 'ah-btn ah-btn-tonal ah-btn-sm', href: link, target: '_blank', rel: 'noreferrer' }, h(Icon, { name: 'link-external', size: 14 }), sess.user_code ? ' Mở trang xác nhận' : ' Mở trang authorize'))
+      : null,
+    sess && sess.kind === 'cli' && sess.status === 'pending'
+      ? h(
+          'form',
+          { className: 'ah-login-step', onSubmit: sendCode },
+          h('span', null, sess.needs_code ? '2. Sau khi authorize, dán mã (code#state) vào đây:' : 'Đang chờ Hermes xác nhận mã…'),
+          sess.needs_code ? h('input', { className: 'ah-input ah-mono', type: 'password', autoComplete: 'off', value: code, placeholder: 'Mã authorize', onChange: e => setCode(e.target.value) }) : null,
+          sess.needs_code ? h('button', { type: 'submit', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: busy || !code.trim() }, 'Xác nhận') : null
+        )
+      : null,
+    sess && sess.status === 'pending' && sess.kind !== 'cli' ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Đang chờ xác nhận trên trình duyệt…') : null,
+    sess && sess.status === 'approved' ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'pass', size: 12 }), ' Đã đăng nhập.') : null,
+    sess && ['error', 'expired', 'denied'].includes(sess.status) ? h('p', { className: 'ah-live-error', role: 'alert' }, sess.error || `Đăng nhập không thành công (${sess.status}).`) : null,
+    sess && sess.log && sess.log.length && sess.status !== 'approved' ? h('details', { className: 'ah-login-log' }, h('summary', null, 'Nhật ký lệnh'), h('pre', null, sess.log.join('\n'))) : null,
+    err ? h('p', { className: 'ah-live-error', role: 'alert' }, err) : null,
+    h('div', { className: 'ah-edit-actions' }, h('span', { className: 'ah-spacer' }), h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: cancel }, sess && sess.status === 'approved' ? 'Đóng' : 'Hủy'))
+  )
+}
+
+function ProviderRow({ agent, p, usage, now }) {
+  const [login, setLogin] = useState(false)
+  const st = p.status || {}
+  const viaCC = usage && usage.status && usage.status.via === 'claude-code'
+  const ok = st.logged_in || viaCC
+  const shown = viaCC && !st.logged_in ? usage.status : st
+  const canLogin = p.id === 'openai-codex' || p.id === 'anthropic' || p.flow === 'device_code'
+  const done = changed => {
+    setLogin(false)
+
+    if (changed) {
+      void fetchProviders(agent)
+      void fetchUsage(agent, 8)
+    }
+  }
+
+  return h(
+    'div',
+    { className: 'ah-acct' },
+    h(
+      'div',
+      { className: 'ah-acct-head' },
+      h('span', { className: cx('ah-acct-dot', ok ? 'is-ok' : 'is-off') }),
+      h('div', { className: 'ah-acct-main' }, h('b', null, p.label || p.name), h('span', { className: 'ah-row-sub' }, ok ? `Đã đăng nhập · ${viaCC && !st.logged_in ? 'qua Claude Code' : shown.source_label || shown.source || ''}` : 'Chưa đăng nhập')),
+      ok && shown.expires_at_s ? h('span', { className: 'ah-row-sub', title: fmtClock(shown.expires_at_s) }, `Token còn ${untilText(shown.expires_at_s, now)}${shown.has_refresh_token ? ' · tự làm mới' : ''}`) : null,
+      h('span', { className: 'ah-spacer' }),
+      canLogin && !login ? h('button', { type: 'button', className: cx('ah-btn ah-btn-sm ah-state', ok ? 'ah-btn-text' : 'ah-btn-tonal'), onClick: () => setLogin(true) }, h(Icon, { name: 'key', size: 14 }), ok ? ' Đăng nhập lại' : ' Đăng nhập') : null,
+      !canLogin && p.cli_command ? h('code', { className: 'ah-row-sub ah-mono' }, p.cli_command) : null
+    ),
+    login ? h(LoginPanel, { agent, provider: p.id, onDone: done }) : null
+  )
+}
+
+function Accounts({ s, agent }) {
+  const pv = s.providers[agent]
+  const rows = (pv && pv.data && pv.data.providers) || []
+  const usageRows = (s.usage[agent] && s.usage[agent].data && s.usage[agent].data.providers) || []
+  const [more, setMore] = useState(false)
+  const now = Date.now()
+
+  useEffect(() => {
+    void fetchProviders(agent)
+
+    if (!s.usage[agent]) {
+      void fetchUsage(agent, 8)
+    }
+  }, [agent])
+
+  const main = rows.filter(r => HUB_PROVIDER_IDS.includes(r.id))
+  const other = rows.filter(r => !HUB_PROVIDER_IDS.includes(r.id) && r.id !== 'claude-code')
+
+  return h(
+    SectionCard,
+    { title: 'Tài khoản model', icon: 'account' },
+    h(
+      'div',
+      { className: 'ah-acct-list' },
+      !pv ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Đang kiểm tra đăng nhập…') : null,
+      pv && pv.status === 'error' && !rows.length ? h(ErrorState, { message: 'Không đọc được trạng thái đăng nhập.', detail: pv.error, onRetry: () => void fetchProviders(agent) }) : null,
+      main.map(p => h(ProviderRow, { key: p.id, agent, p, usage: usageRows.find(u => u.id === p.id), now })),
+      other.length
+        ? h(
+            'details',
+            { className: 'ah-acct-more', open: more, onToggle: e => setMore(e.target.open) },
+            h('summary', null, `Nhà cung cấp khác (${other.filter(p => p.status && p.status.logged_in).length}/${other.length} đã đăng nhập)`),
+            more ? other.map(p => h(ProviderRow, { key: p.id, agent, p, now })) : null
+          )
+        : null,
+      h('p', { className: 'ah-field-hint' }, 'Đăng nhập dùng đúng luồng của Hermes (như Settings > Accounts). Token do Hermes lưu; Agents Hub chỉ đọc trạng thái và usage.')
+    )
+  )
+}
+
+/* ── team roster ── */
+
+function TeamEditor({ s }) {
+  const t = s.team
+  const rows = (t && t.data && t.data.agents) || []
+  const [edit, setEdit] = useState(null)
+  const [form, setForm] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState(null)
+
+  useEffect(() => {
+    void fetchTeam()
+  }, [])
+
+  const save = async (id, body) => {
+    setBusy(true)
+
+    try {
+      await C.rest(`/team/${enc(id)}`, { method: 'PUT', body })
+      setEdit(null)
+      await fetchTeam()
+      void load()
+    } catch (err) {
+      setMsg(errText(err))
+    }
+
+    setBusy(false)
+  }
+
+  const rerun = async () => {
+    setBusy(true)
+
+    try {
+      await C.rest('/setup', { method: 'POST', body: {} })
+      await fetchTeam()
+      setMsg('Đã chạy lại khởi tạo: cập nhật danh sách nhóm và TEAM.md.')
+    } catch (err) {
+      setMsg(errText(err))
+    }
+
+    setBusy(false)
+  }
+
+  return h(
+    SectionCard,
+    { title: 'Nhóm agent', icon: 'organization' },
+    h(
+      'div',
+      { className: 'ah-team' },
+      h(
+        'div',
+        { className: 'ah-works-bar' },
+        h('span', { className: 'ah-row-sub' }, `${rows.length} thành viên · agent đọc danh sách ở TEAM.md để điều phối`),
+        h('span', { className: 'ah-spacer' }),
+        h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', disabled: busy, onClick: () => void rerun() }, h(Icon, { name: 'refresh', size: 14 }), ' Chạy lại khởi tạo'),
+        form ? null : h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', onClick: () => setForm(true) }, h(Icon, { name: 'person-add', size: 14 }), ' Tạo agent')
+      ),
+      msg ? h('p', { className: 'ah-row-sub', role: 'status' }, msg) : null,
+      form ? h(NewAgentForm, { rows, onClose: made => { setForm(false); if (made) { setMsg(`Đã tạo agent "${made}".`); void fetchTeam(); void load() } } }) : null,
+      !t ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Đang tải nhóm…') : null,
+      t && t.status === 'error' && !rows.length ? h(ErrorState, { message: 'Không tải được nhóm (cần restart gateway sau khi cập nhật plugin).', detail: t.error, onRetry: () => void fetchTeam() }) : null,
+      rows.map(r =>
+        edit === r.id
+          ? h(TeamRowEdit, { key: r.id, r, rows, busy, onSave: body => void save(r.id, body), onCancel: () => setEdit(null) })
+          : h(
+              'div',
+              { key: r.id, className: 'ah-team-row' },
+              h(Avatar, { id: r.id, name: r.name, size: 36 }),
+              h('div', { className: 'ah-team-main' }, h('b', null, r.name || r.id, h('span', { className: 'ah-row-sub ah-mono' }, ` ${r.id}`)), h('span', { className: 'ah-row-sub' }, `${r.role || 'Agent'} · báo cáo ${agentLabel(rows, r.reports_to)}`), r.capabilities ? h('span', { className: 'ah-row-sub ah-team-cap' }, r.capabilities) : null),
+              h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', title: 'Sinh khuôn mặt ngẫu nhiên mới', disabled: busy, onClick: () => void save(r.id, { avatar: 'random' }) }, h(Icon, { name: 'refresh', size: 14 }), ' Đổi avatar'),
+              h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', disabled: busy, onClick: () => setEdit(r.id) }, h(Icon, { name: 'edit', size: 14 }), ' Sửa')
+            )
+      ),
+      t && t.data && t.data.skills && t.data.skills.length
+        ? h('p', { className: 'ah-field-hint' }, 'Agent tự đọc hướng dẫn: ', t.data.skills.map((k, i) => h('code', { key: k.name, title: k.description }, `${i ? ', ' : ''}${k.name}`)))
+        : null
+    )
+  )
+}
+
+function agentLabel(rows, id) {
+  const r = rows.find(x => x.id === id)
+
+  return r ? r.name || r.id : id || '—'
+}
+
+function TeamRowEdit({ r, rows, busy, onSave, onCancel }) {
+  const [v, setV] = useState({ name: r.name || '', role: r.role || '', reports_to: r.reports_to || '', capabilities: r.capabilities || '' })
+  const set = k => e => setV({ ...v, [k]: e.target.value })
+  const field = (label, control) => h('label', { className: 'ah-field' }, h('span', { className: 'ah-field-label' }, label), control)
+
+  return h(
+    'form',
+    { className: 'ah-team-edit', onSubmit: e => { e.preventDefault(); onSave(v) } },
+    h('div', { className: 'ah-sched-grid' }, field('Tên hiển thị', h('input', { className: 'ah-input', value: v.name, onChange: set('name') })), field('Vai trò', h('input', { className: 'ah-input', value: v.role, onChange: set('role') }))),
+    field('Báo cáo cho', h('select', { className: 'ah-input', value: v.reports_to, onChange: set('reports_to') }, h('option', { value: 'Owner' }, 'Owner'), rows.filter(x => x.id !== r.id).map(x => h('option', { key: x.id, value: x.id }, x.name || x.id)), v.reports_to && v.reports_to !== 'Owner' && !rows.some(x => x.id === v.reports_to) ? h('option', { value: v.reports_to }, v.reports_to) : null)),
+    field('Nhiệm vụ / năng lực (agent dùng để chọn người giao việc)', h('textarea', { className: 'ah-input', rows: 3, value: v.capabilities, onChange: set('capabilities') })),
+    h('div', { className: 'ah-edit-actions' }, h('span', { className: 'ah-spacer' }), h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: onCancel }, 'Hủy'), h('button', { type: 'submit', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: busy }, 'Lưu'))
+  )
+}
+
+function NewAgentForm({ rows, onClose }) {
+  const [v, setV] = useState({ id: '', name: '', role: '', capabilities: '', reports_to: 'default', clone_from: 'default' })
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState(null)
+  const [seed] = useState(() => Math.random().toString(16).slice(2, 10))
+  const set = k => e => setV({ ...v, [k]: k === 'id' ? e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '-') : e.target.value })
+  const field = (label, control, hint) => h('label', { className: 'ah-field' }, h('span', { className: 'ah-field-label' }, label), control, hint ? h('span', { className: 'ah-field-hint' }, hint) : null)
+  const submit = async e => {
+    e.preventDefault()
+
+    if (!v.id || !v.role.trim()) {
+      setErr('Cần id và vai trò.')
+
+      return
+    }
+
+    setBusy(true)
+    setErr(null)
+
+    try {
+      const made = await C.rest('/team', { method: 'POST', body: v })
+
+      onClose(made.name || made.id)
+    } catch (err2) {
+      setErr(errText(err2))
+      setBusy(false)
+    }
+  }
+
+  return h(
+    'form',
+    { className: 'ah-sched-form', onSubmit: submit },
+    h('div', { className: 'ah-team-new-head' }, h('span', { className: 'ah-avatar is-face mood-happy', style: { '--ah-ac': agentColor(seed), '--ah-size': '44px' } }, h(Face, { id: seed, seed, mood: 'happy' })), h('span', { className: 'ah-row-sub' }, 'Avatar được sinh ngẫu nhiên; đổi lại được sau.')),
+    h('div', { className: 'ah-sched-grid' }, field('Id (tên profile)', h('input', { className: 'ah-input ah-mono', value: v.id, placeholder: 'vd: qa-tester', onChange: set('id') })), field('Tên hiển thị', h('input', { className: 'ah-input', value: v.name, placeholder: 'vd: QA Tester', onChange: set('name') }))),
+    field('Vai trò', h('input', { className: 'ah-input', value: v.role, placeholder: 'vd: Kiểm thử chất lượng', onChange: set('role') })),
+    field('Nhiệm vụ / năng lực', h('textarea', { className: 'ah-input', rows: 3, value: v.capabilities, placeholder: 'Agent này làm gì, giỏi gì, không làm gì', onChange: set('capabilities') }), 'Ghi vào SOUL.md và TEAM.md để các agent khác biết khi nào giao việc cho agent này.'),
+    h(
+      'div',
+      { className: 'ah-sched-grid' },
+      field('Báo cáo cho', h('select', { className: 'ah-input', value: v.reports_to, onChange: set('reports_to') }, rows.map(x => h('option', { key: x.id, value: x.id }, x.name || x.id)))),
+      field('Sao chép cấu hình từ', h('select', { className: 'ah-input', value: v.clone_from, onChange: set('clone_from') }, rows.map(x => h('option', { key: x.id, value: x.id }, x.name || x.id))), 'Dùng chung model và đăng nhập.')
+    ),
+    err ? h('p', { className: 'ah-live-error', role: 'alert' }, err) : null,
+    h('div', { className: 'ah-edit-actions' }, h('span', { className: 'ah-spacer' }), h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', disabled: busy, onClick: () => onClose(null) }, 'Hủy'), h('button', { type: 'submit', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: busy }, busy ? h(Icon, { name: 'loading', size: 14, spinning: true }) : h(Icon, { name: 'person-add', size: 14 }), ' Tạo agent'))
+  )
+}
+
+function ConfigTab({ s }) {
+  const agents = list('agents', 'agents')
+  const [agent, setAgent] = useState(s.ui.agent || 'default')
+
+  return h(
+    'div',
+    { className: 'ah-config' },
+    h(
+      'div',
+      { className: 'ah-works-bar' },
+      h('label', { className: 'ah-config-pick' }, h('span', { className: 'ah-field-label' }, 'Tài khoản của agent'), h('select', { className: 'ah-input', value: agent, onChange: e => setAgent(e.target.value) }, agents.map(a => h('option', { key: a.id, value: a.id }, a.name || a.id)))),
+      h('span', { className: 'ah-spacer' }),
+      h(UsageBar, { s, agent })
+    ),
+    h(Accounts, { key: agent, s, agent }),
+    h(TeamEditor, { s })
   )
 }
 
@@ -6504,6 +7107,52 @@ const CSS = `
 
 /* popovers: model, reasoning, slash */
 .ah-root .ah-composer{position:relative}
+.ah-root .ah-usage{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-height:22px;padding:2px 4px 0;font-size:11.5px;line-height:16px;color:var(--ah-on-surface-variant)}
+.ah-root .ah-usage-muted{display:inline-flex;align-items:center;gap:4px;opacity:.8}
+.ah-root .ah-usage-chip{position:relative;display:inline-flex;align-items:center;gap:7px;height:22px;padding:0 8px;border:1px solid var(--ah-outline-variant);border-radius:999px;background:var(--ah-surface);color:var(--ah-on-surface-variant);font:inherit;cursor:default;outline:0}
+.ah-root button.ah-usage-chip{cursor:pointer}
+.ah-root .ah-usage-chip b{font-weight:600;color:var(--ah-on-surface)}
+.ah-root .ah-usage-chip.is-muted{opacity:.75}
+.ah-root .ah-usage-chip:focus-visible{box-shadow:0 0 0 2px var(--ah-primary)}
+.ah-root .ah-usage-win{display:inline-flex;align-items:center;gap:4px;font-variant-numeric:tabular-nums}
+.ah-root .ah-usage-win small{opacity:.75;font-size:10.5px}
+.ah-root .ah-usage-meter{display:inline-block;width:28px;height:4px;border-radius:2px;background:var(--ah-surface-highest);overflow:hidden}
+.ah-root .ah-usage-meter.is-wide{display:block;width:100%;height:5px;margin:3px 0}
+.ah-root .ah-usage-meter>span{display:block;height:100%;border-radius:inherit;background:var(--ah-ok)}
+.ah-root .ah-usage-meter>span.is-warn{background:var(--ah-warn)}
+.ah-root .ah-usage-meter>span.is-err{background:var(--ah-err)}
+.ah-root .ah-usage-chip.is-err{border-color:color-mix(in srgb,var(--ah-err) 55%,transparent)}
+.ah-root .ah-usage-chip.is-warn{border-color:color-mix(in srgb,var(--ah-warn) 55%,transparent)}
+.ah-root .ah-usage-stale{color:var(--ah-warn)}
+.ah-root .ah-usage-pop{display:none;position:absolute;left:0;bottom:calc(100% + 6px);z-index:1;width:260px;padding:10px 12px;border:1px solid var(--ah-outline-variant);border-radius:var(--ah-r-md);background:var(--ah-surface-high);color:var(--ah-on-surface);box-shadow:0 8px 24px rgba(0,0,0,.22);flex-direction:column;gap:6px;font-size:12px;line-height:16px;white-space:normal}
+.ah-root .ah-usage-chip:hover .ah-usage-pop,.ah-root .ah-usage-chip:focus .ah-usage-pop{display:flex}
+.ah-root .ah-usage-pop small{color:var(--ah-on-surface-variant)}
+.ah-root .ah-usage-pop hr{width:100%;border:0;border-top:1px solid var(--ah-outline-variant);margin:2px 0}
+.ah-root .ah-usage-line{display:flex;justify-content:space-between;gap:10px}
+.ah-root .ah-usage-line>span:first-child{color:var(--ah-on-surface-variant)}
+.ah-root .ah-usage-wrow{display:flex;flex-direction:column}
+.ah-root .ah-usage-err{color:var(--ah-err)}
+.ah-root .ah-config{display:flex;flex-direction:column;gap:16px;max-width:960px}
+.ah-root .ah-config-pick{display:flex;align-items:center;gap:8px}
+.ah-root .ah-config-pick .ah-input{width:auto;min-width:180px}
+.ah-root .ah-acct-list,.ah-root .ah-team{display:flex;flex-direction:column;gap:10px;padding:12px 16px 16px}
+.ah-root .ah-acct{border:1px solid var(--ah-outline-variant);border-radius:var(--ah-r-md);padding:10px 12px}
+.ah-root .ah-acct-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.ah-root .ah-acct-main{display:flex;flex-direction:column;min-width:0}
+.ah-root .ah-acct-dot{width:9px;height:9px;border-radius:50%;flex:none;background:var(--ah-outline)}
+.ah-root .ah-acct-dot.is-ok{background:var(--ah-ok)}
+.ah-root .ah-acct-more summary{cursor:pointer;font-size:12px;color:var(--ah-on-surface-variant);padding:4px 0}
+.ah-root .ah-acct-more .ah-acct{margin-top:8px}
+.ah-root .ah-login{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--ah-outline-variant)}
+.ah-root .ah-login-step{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
+.ah-root .ah-login-step .ah-input{flex:1;min-width:220px}
+.ah-root .ah-login-code{font-family:var(--ah-mono);font-size:18px;font-weight:700;letter-spacing:.12em;padding:2px 10px;border-radius:var(--ah-r-sm);background:var(--ah-surface-highest)}
+.ah-root .ah-login-log pre{max-height:160px;overflow:auto;font-size:11px;margin:4px 0 0;white-space:pre-wrap}
+.ah-root .ah-team-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-top:1px solid var(--ah-outline-variant)}
+.ah-root .ah-team-main{display:flex;flex-direction:column;min-width:0;flex:1}
+.ah-root .ah-team-cap{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.ah-root .ah-team-edit{display:flex;flex-direction:column;gap:10px;padding:10px 0;border-top:1px solid var(--ah-outline-variant)}
+.ah-root .ah-team-new-head{display:flex;align-items:center;gap:12px}
 .ah-root .ah-picker{display:inline-flex;align-items:center;gap:2px;min-width:0}
 .ah-root .ah-pop{position:absolute;left:0;bottom:calc(100% + 6px);z-index:1;display:flex;flex-direction:column;min-width:220px;max-height:min(420px,60vh);border:1px solid var(--ah-outline-variant);border-radius:var(--ah-r-md);background:var(--popover,var(--theme-elevated-seed,var(--ah-surface-container)));color:var(--popover-foreground,var(--ah-on-surface));backdrop-filter:blur(18px);box-shadow:0 8px 28px color-mix(in srgb,#000 22%,transparent);overflow:hidden;animation:ah-pop-in .14s ease-out}
 .ah-root .ah-pop-model{width:min(380px,80cqw)}
