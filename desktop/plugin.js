@@ -27,7 +27,7 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.9'
+const PLUGIN_VERSION = '1.6.10'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
@@ -712,6 +712,7 @@ async function fetchTimeline(agent, { more = false } = {}) {
     }
 
     set(patch)
+    settleUnsaved(agent)
   } catch (err) {
     const cur = S.timeline[agent] || emptyTimeline()
 
@@ -1080,19 +1081,57 @@ function applyEvents(agent, events, { force = false } = {}) {
   }
 }
 
+// A finished turn's reply must be in the loaded timeline before its live card and the optimistic row go
+// away: a slow/failed timeline read (or a Bot Chat outside the session window) otherwise made the whole
+// exchange vanish from the Hub until a later refresh happened to include it.
+const SAVE_RETRIES = 4
+const SAVE_RETRY_MS = 1500
+
+function timelineHasReply(agent, sinceSec) {
+  return allTimelineItems(agent).some(it => it.type === 'message' && it.role === 'assistant' && Number(it.timestamp) >= sinceSec - 2)
+}
+
+// Called after every timeline refresh: drop a kept ("unsaved") live card once its reply has been loaded.
+function settleUnsaved(agent) {
+  const lv = liveOf(agent)
+
+  if (!lv || !lv.turn || lv.turn.active || !lv.turn.unsaved || !timelineHasReply(agent, lv.turn.startedMs / 1000)) {
+    return
+  }
+
+  setLive(agent, { turn: null })
+
+  const st = S && S.send[agent]
+
+  if (st && !st.busy && st.optimistic && st.optimistic.length) {
+    setSend(agent, { optimistic: [] })
+  }
+}
+
 async function finishTurn(agent, { drain = true } = {}) {
+  const lv0 = liveOf(agent)
+  const st0 = S && S.send[agent]
+  const since = lv0 && lv0.turn ? lv0.turn.startedMs / 1000 : st0 && st0.sentAt ? num(st0.sentAt) : 0
+
   await fetchTimeline(agent)
 
+  for (let i = 0; i < SAVE_RETRIES && since && !timelineHasReply(agent, since); i += 1) {
+    await new Promise(resolve => setTimeout(resolve, SAVE_RETRY_MS))
+    await fetchTimeline(agent)
+  }
+
+  const saved = !since || timelineHasReply(agent, since)
   const lv = liveOf(agent)
 
   if (lv && lv.turn && !lv.turn.active) {
-    setLive(agent, { turn: lv.turn.error ? { ...lv.turn, stale: true } : null })
+    // Not loaded yet: keep the card (marked unsaved) instead of showing an empty chat; settleUnsaved clears it.
+    setLive(agent, { turn: lv.turn.error ? { ...lv.turn, stale: true } : saved ? null : { ...lv.turn, stale: true, unsaved: true } })
   }
 
   const st = S && S.send[agent]
 
   if (st && st.busy) {
-    setSend(agent, { busy: false, optimistic: [], phase: null })
+    setSend(agent, saved ? { busy: false, optimistic: [], phase: null } : { busy: false, phase: null })
   }
 
   void fetchWorkspace(agent)

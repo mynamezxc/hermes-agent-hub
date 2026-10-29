@@ -564,6 +564,26 @@ class V2Test(unittest.TestCase):
         d = self.get("/agents/sales/timeline").json()
         self.assertEqual((d["items"], d["has_more"], d["next_before"]), ([], False, None))
 
+    def test_timeline_keeps_long_lived_bot_chat(self):
+        # Field report: a Bot Chat started weeks ago fell out of the 60-session window once newer
+        # cron/tool sessions piled up, so the owner's whole chat vanished after every refresh.
+        db = self.root / "state.db"
+        con = sqlite3.connect(db)
+        con.execute("UPDATE sessions SET started_at = ? WHERE id = 'bc1'", (self.t + 1,))
+        con.commit()
+        con.close()
+        old = self.m.MAX_TIMELINE_SESSIONS
+        self.m.MAX_TIMELINE_SESSIONS = 1
+        try:
+            items = self.get("/agents/default/timeline").json()["items"]
+            self.assertIn("ping", [i.get("content") for i in items if i["type"] == "message"])
+        finally:
+            self.m.MAX_TIMELINE_SESSIONS = old
+            con = sqlite3.connect(db)
+            con.execute("UPDATE sessions SET started_at = ? WHERE id = 'bc1'", (self.t + 300,))
+            con.commit()
+            con.close()
+
     # B5
     def test_chat_lookup(self):
         d = self.get("/agents/default/chat").json()

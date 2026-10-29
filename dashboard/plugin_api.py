@@ -1161,10 +1161,21 @@ def agent_timeline(agent: str, before: Optional[float] = Query(None),
         before = None
     where = " WHERE started_at < ?" if before is not None else ""
     params: tuple = (before,) if before is not None else ()
-    sessions = query(db, f"SELECT * FROM sessions{where} ORDER BY started_at DESC LIMIT ?",
+    # Order by last activity, not start time: a long-lived Bot Chat started weeks ago must stay on the first
+    # page even after 60+ newer short sessions (cron/tool/subagent); ordering by started_at dropped it, so the
+    # owner's chat history vanished from the Hub after every refresh.
+    sessions = query(db, f"SELECT * FROM sessions{where} "
+                         f"ORDER BY COALESCE(last_activity_at, ended_at, started_at, 0) DESC, started_at DESC LIMIT ?",
                      (*params, MAX_TIMELINE_SESSIONS + 1))
     more_sessions = len(sessions) > MAX_TIMELINE_SESSIONS
     sessions = sessions[:MAX_TIMELINE_SESSIONS]
+    # Always merge the Hub's own chat (canonical Bot Chat) with the other sessions of this profile
+    # (Messenger/tool triggers, desktop chats, cron): it must never fall out of the session window,
+    # or the owner's reply vanishes from the Hub right after the turn ends.
+    chat_id = agent_chat(agent).get("session_id")
+    if chat_id and all(r["id"] != chat_id for r in sessions):
+        sessions += query(db, "SELECT * FROM sessions WHERE id = ?" + (" AND started_at < ?" if before is not None else ""),
+                          (chat_id, *params))
     owners: dict[str, Optional[str]] = {}
     items: list[dict[str, Any]] = []
     for row in sessions:
