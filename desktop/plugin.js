@@ -6332,7 +6332,8 @@ function UsagePop({ p, now }) {
     h('hr'),
     h('small', { className: 'ah-usage-sub' }, 'Login (not usage limits)'),
     line('Signed in via', st.via === 'claude-code' ? 'Claude Code' : st.source_label || st.source || '—'),
-    st.expires_at_s ? line(st.has_refresh_token ? 'Login token renews' : 'Login token expires', `${fmtClock(st.expires_at_s)} (in ${untilText(st.expires_at_s, now)})`) : null,
+    // Claude's OAuth token rotates every few hours and says nothing about usage limits; only Codex shows it.
+    st.expires_at_s && p.id !== 'anthropic' ? line(st.has_refresh_token ? 'Login token renews' : 'Login token expires', `${fmtClock(st.expires_at_s)} (in ${untilText(st.expires_at_s, now)})`) : null,
     line('Token auto-refresh', st.has_refresh_token ? 'Yes' : st.source && /pool|chatgpt|codex/.test(String(st.source)) ? 'Managed by Hermes' : 'No'),
     st.last_refresh_s ? line('Last refreshed', relTime(st.last_refresh_s, now)) : null,
     line('Usage updated', p.updated_at ? relTime(p.updated_at, now) : '—'),
