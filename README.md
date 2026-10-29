@@ -11,7 +11,7 @@ running commands · scheduled jobs · team roster · Claude & Codex usage at a g
 
 <p>
   <a href="https://github.com/mynamezxc/hermes-agent-hub/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/mynamezxc/hermes-agent-hub?style=flat-square&logo=github&color=5B6CE0"></a>
-  <a href="https://github.com/mynamezxc/hermes-agent-hub/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.6.7-5B6CE0?style=flat-square"></a>
+  <a href="https://github.com/mynamezxc/hermes-agent-hub/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.6.8-5B6CE0?style=flat-square"></a>
   <a href="https://github.com/NousResearch/hermes-agent"><img alt="Hermes Agent plugin" src="https://img.shields.io/badge/Hermes%20Agent-plugin-0E9F8E?style=flat-square"></a>
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-3B8FD9?style=flat-square">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-D9822B?style=flat-square"></a>
@@ -44,8 +44,16 @@ teammate.
 
 ## 🚀 Install
 
-You need [Hermes Agent](https://hermes-agent.nousresearch.com/docs) with Hermes Desktop. The installer checks for
-Hermes, installs or updates the plugin, enables it and verifies the result.
+You need [Hermes Agent](https://hermes-agent.nousresearch.com/docs) with Hermes Desktop.
+
+**Recommended: from Hermes Desktop.** Open the Plugins page (**Settings → Plugins** or **Capabilities → Plugins**),
+choose **Install from Git**, enter `mynamezxc/hermes-agent-hub` and keep the *Desktop* target checked. This switches
+on both halves of the plugin (the page and its backend) in one go. Then restart the gateway once
+(<kbd>Ctrl</kbd>+<kbd>K</kbd> → **Restart gateway**).
+
+**From a terminal.** The installer checks for Hermes, installs or updates the plugin, enables it, verifies the result
+and **restarts the gateway** so the backend loads (agents that are running at that moment are interrupted; opt out
+with `--no-restart` / `$env:AGENTS_HUB_RESTART='0'`).
 
 **macOS / Linux / WSL / Git Bash**
 
@@ -65,16 +73,19 @@ irm https://raw.githubusercontent.com/mynamezxc/hermes-agent-hub/main/install.ps
 hermes plugins install mynamezxc/hermes-agent-hub --enable
 ```
 
-Then, once:
+After a terminal install, once:
 
-1. Restart the gateway (Desktop: <kbd>Ctrl</kbd>+<kbd>K</kbd> → **Restart gateway**, or `hermes gateway restart`).
+1. Restart the gateway if the installer did not (Desktop: <kbd>Ctrl</kbd>+<kbd>K</kbd> → **Restart gateway**, or
+   `hermes gateway restart`).
 2. **Turn on the desktop half.** Hermes Desktop keeps a package's desktop half switched **off** until you enable it
    (`--enable` only enables the agent half). Open **Settings → Plugins** (or **Capabilities → Plugins**), find
    **Agents Hub** and switch on its *Desktop* toggle. Turning the package on from that page switches both halves on.
 3. Open **Agents Hub** from the sidebar or press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd>.
 
-> No **Agents Hub** entry in the sidebar? It is almost always step 2. Still missing: <kbd>Ctrl</kbd>+<kbd>K</kbd> →
-> **Reload desktop plugins**, and check that `<HERMES_HOME>/desktop-plugins/agents-hub/plugin.js` exists.
+> **Troubleshooting.** No **Agents Hub** in the sidebar: step 2, then <kbd>Ctrl</kbd>+<kbd>K</kbd> → **Reload desktop
+> plugins**. The page says *backend is not loaded* or shows a yellow *restart the gateway* banner: the page was updated
+> but the gateway still runs the old backend, so restart the gateway. *Cannot reach the Hermes gateway*: the gateway
+> is starting or restarting; the Hub retries by itself.
 
 <details>
 <summary>Installer options, update, uninstall, manual install</summary>
@@ -82,8 +93,8 @@ Then, once:
 | Option | Bash | PowerShell |
 |---|---|---|
 | Install from a fork or a local checkout | `--repo owner/repo` or `AGENTS_HUB_REPO=…` | `-Repo owner/repo` or `$env:AGENTS_HUB_REPO` |
-| Replace a copy that was not installed from git | `--force` | `-Force` |
-| Restart the gateway when done | `--restart` | `-Restart` |
+| Replace a copy that was not installed from git | `--force` | `-Force` or `$env:AGENTS_HUB_FORCE='1'` |
+| Do not restart the gateway when done | `--no-restart` or `AGENTS_HUB_RESTART=0` | `-NoRestart` or `$env:AGENTS_HUB_RESTART='0'` |
 
 - **Update**: run the installer again, or `hermes plugins update agents-hub`.
 - **Uninstall**: `hermes plugins remove agents-hub`. The Hub's own state in `<HERMES_HOME>/agents-hub/` is left for you to delete.

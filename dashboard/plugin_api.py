@@ -736,6 +736,21 @@ def _messages_session(profile: str, session_id: str, limit: int, owner: str,
     return [_shape_message(r, profile, owner) for r in rows]
 
 
+def _plugin_version() -> str:
+    try:
+        text = (Path(__file__).resolve().parent.parent / "plugin.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    found = re.search(r"^version:\s*['\"]?([^'\"\s]+)", text, re.M)
+    return found.group(1) if found else ""
+
+
+@router.get("/health")
+def health() -> dict[str, Any]:
+    """Cheap liveness + version probe: lets the page tell 'backend not reloaded yet' from real errors."""
+    return {"ok": True, "plugin": "agents-hub", "version": _plugin_version(), "agents": len(list_agents()), "time": time.time()}
+
+
 _IMG_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
 _IMG_MAX_BYTES = 12 * 1024 * 1024
 
@@ -2250,7 +2265,11 @@ def ensure_team() -> dict[str, dict[str, Any]]:
     team = load_team()
     agents = list_agents()
     missing = [a for a in agents if a not in team]
-    if missing or not (_hub_dir("") / "TEAM.md").is_file():
+    # Older versions listed Hermes's hidden profile dirs (.deleted, .<id>.staging-*) as agents: drop them.
+    stale = [a for a in team if str(a).startswith(".")]
+    for a in stale:
+        team.pop(a, None)
+    if missing or stale or not (_hub_dir("") / "TEAM.md").is_file():
         for a in missing:
             team[a] = _new_team_entry(a)
         _save_team(team)

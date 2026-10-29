@@ -2,8 +2,10 @@
 #
 #   irm https://raw.githubusercontent.com/mynamezxc/hermes-agent-hub/main/install.ps1 | iex
 #
-# Options when run as a file:  .\install.ps1 [-Repo owner/repo|git-url|file:///path] [-Force] [-Restart]
-# Options when piped into iex: $env:AGENTS_HUB_REPO, $env:AGENTS_HUB_FORCE='1', $env:AGENTS_HUB_RESTART='1'
+# Options when run as a file:  .\install.ps1 [-Repo owner/repo|git-url|file://C:/path] [-Force] [-NoRestart]
+# Options when piped into iex: $env:AGENTS_HUB_REPO, $env:AGENTS_HUB_FORCE='1', $env:AGENTS_HUB_RESTART='0'
+# By default the gateway is restarted after an install or update so the backend loads (running agents are
+# interrupted); opt out with -NoRestart / $env:AGENTS_HUB_RESTART='0'.
 #
 # Kept iex-safe on purpose: ASCII only, no BOM, no top-level param() block, and no 'exit'
 # (under iex 'exit' would close the user's PowerShell window).
@@ -12,7 +14,7 @@ function Install-AgentsHub {
   param(
     [string]$Repo = 'mynamezxc/hermes-agent-hub',
     [switch]$Force,
-    [switch]$Restart
+    [bool]$Restart = $true
   )
   $ErrorActionPreference = 'Stop'
   $Name = 'agents-hub'
@@ -79,16 +81,17 @@ function Install-AgentsHub {
   }
   Say "$Name is installed and enabled"
 
-  # 4. Restart the gateway so the dashboard routes load.
+  # 4. Restart the gateway so the new backend loads (the page reloads by itself, the backend does not).
   if ($Restart) {
-    Say 'Restarting the Hermes gateway'
+    Say 'Restarting the Hermes gateway so the Agents Hub backend loads (running agents are interrupted)'
     & $Hermes gateway restart
-    if ($LASTEXITCODE -ne 0) { Warn 'Gateway restart failed; restart it yourself (Desktop: Ctrl+K, Restart gateway).' }
+    if ($LASTEXITCODE -ne 0) { Warn 'Gateway restart failed; restart it yourself (Desktop: Ctrl+K, Restart gateway).' } else { Say 'Gateway restarted' }
   } else {
     Say 'Next: restart the gateway (Desktop: Ctrl+K, "Restart gateway"; CLI: hermes gateway restart).'
   }
-  Say 'Then turn on the desktop half ONCE: Hermes Desktop > Settings > Plugins (or Capabilities > Plugins) > Agents Hub > Desktop on.'
-  Say '  (Desktop keeps a package''s desktop half off until you enable it; --enable only covers the agent half.)'
+  Say 'Then, ONCE, turn on the desktop half: Hermes Desktop > Settings > Plugins (or Capabilities > Plugins) > Agents Hub > Desktop on.'
+  Say '  (Desktop keeps a package''s desktop half off until you enable it; --enable only covers the agent half.'
+  Say '   Installing from Hermes Desktop itself - Plugins > Install from Git - switches both halves on.)'
   Say 'Open Agents Hub from the sidebar or press Ctrl+Alt+H. Not there? Ctrl+K > Reload desktop plugins.'
   return $true
 }
@@ -97,13 +100,14 @@ function Install-AgentsHub {
 $AhOpts = @{}
 if ($env:AGENTS_HUB_REPO) { $AhOpts.Repo = $env:AGENTS_HUB_REPO }
 if ($env:AGENTS_HUB_FORCE -eq '1') { $AhOpts.Force = $true }
-if ($env:AGENTS_HUB_RESTART -eq '1') { $AhOpts.Restart = $true }
+if ($env:AGENTS_HUB_RESTART -eq '0') { $AhOpts.Restart = $false }
 $AhArgs = @($args)
 for ($i = 0; $i -lt $AhArgs.Count; $i++) {
   switch -Regex ([string]$AhArgs[$i]) {
     '^-Repo$' { $i++; if ($i -lt $AhArgs.Count) { $AhOpts.Repo = [string]$AhArgs[$i] } }
     '^-Force$' { $AhOpts.Force = $true }
     '^-Restart$' { $AhOpts.Restart = $true }
+    '^-NoRestart$' { $AhOpts.Restart = $false }
     default { Write-Host "!! Unknown option: $($AhArgs[$i])" -ForegroundColor Yellow }
   }
 }

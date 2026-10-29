@@ -27,8 +27,23 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const BACKEND_OFF =
-  'Agents Hub backend is not enabled: add agents-hub to plugins.enabled, then restart the gateway'
+const PLUGIN_VERSION = '1.6.8'
+
+// What a failed request most likely means, in words the owner can act on.
+function backendProblem(err) {
+  const t = String(err || '')
+
+  if (/\b404\b|not found/i.test(t)) {
+    return { kind: 'missing', title: 'The Agents Hub backend is not loaded', hint: 'Restart the gateway once after installing or updating (Ctrl+K, "Restart gateway"), and check that agents-hub is enabled for the agent (hermes plugins list).' }
+  }
+
+  if (/gateway inaccessible|runtime_exited|failed to fetch|econnrefused|econnreset|network ?error|socket hang up|timed out|503|502|504/i.test(t)) {
+    return { kind: 'gateway', title: 'Cannot reach the Hermes gateway', hint: 'It may be starting or restarting. The Hub keeps retrying on its own; if this stays, restart the gateway (Ctrl+K, "Restart gateway").' }
+  }
+
+  return { kind: 'error', title: 'The Agents Hub backend returned an error', hint: 'Retry; if it repeats, restart the gateway and send the details below.' }
+}
+
 
 /* ───────────────────────── tiny element helper ───────────────────────── */
 
@@ -398,6 +413,53 @@ function withTimeout(promise, ms) {
   ]).finally(() => clearTimeout(timer))
 }
 
+let retryDelay = 0
+let retryTimer = null
+
+function scheduleRetry() {
+  if (retryTimer || !C) {
+    return
+  }
+
+  retryDelay = Math.min(retryDelay ? retryDelay * 2 : 3000, 30000)
+  const run = () => {
+    retryTimer = null
+    void load()
+  }
+  retryTimer = typeof C.setTimeout === 'function' ? C.setTimeout(run, retryDelay) || true : setTimeout(run, retryDelay)
+}
+
+// Backend version vs this page: after an update the page reloads at once, the backend only when the
+// gateway restarts. A mismatch (or a backend without /health) means "restart the gateway".
+async function checkHealth() {
+  try {
+    const h = await withTimeout(C.rest('/health'), 8000)
+    S.health = { at: Date.now(), version: (h && h.version) || '', ok: true }
+  } catch (err) {
+    S.health = { at: Date.now(), version: '', ok: false, old: /\b404\b|not found/i.test(errText(err)) }
+  }
+
+  emit()
+}
+
+function backendStale(s) {
+  const hl = s.health
+
+  if (!hl) {
+    return null
+  }
+
+  if (hl.ok && hl.version && hl.version !== PLUGIN_VERSION) {
+    return `The page is Agents Hub ${PLUGIN_VERSION} but the gateway still runs backend ${hl.version}.`
+  }
+
+  if (!hl.ok && hl.old) {
+    return `The page is Agents Hub ${PLUGIN_VERSION} but the gateway still runs an older backend.`
+  }
+
+  return null
+}
+
 function load() {
   if (!C) {
     return Promise.resolve()
@@ -434,6 +496,21 @@ function load() {
       emit()
     })
   )
+    .then(() => {
+      // One failed refresh is usually a gateway hiccup: keep the data, retry soon, and only call the
+      // backend disconnected after two misses in a row.
+      if (S.agents.status === 'error') {
+        S.agentFails = (S.agentFails || 0) + 1
+        scheduleRetry()
+      } else {
+        S.agentFails = 0
+        retryDelay = 0
+      }
+
+      if (S.agents.status !== 'error' && (!S.health || S.health.at < Date.now() - 300000)) {
+        void checkHealth()
+      }
+    })
     .then(async () => {
       if (!S.team) {
         void fetchTeam() // roster path for the goals block; also runs first-run setup server-side
@@ -2214,7 +2291,7 @@ function navKeys(event) {
 
 function AppBar({ s }) {
   const { ui } = s
-  const failed = s.agents.status === 'error'
+  const failed = s.agents.status === 'error' && ((s.agentFails || 0) >= 2 || !s.agents.data)
   const ago = s.fetchedAt ? relTime(s.fetchedAt / 1000, s.now) : null
 
   const liveText = failed ? 'Backend disconnected' : ago ? `Updated ${ago}` : 'Connecting'
@@ -2771,6 +2848,10 @@ function Overview({ s, v }) {
   const open = v.tasks.filter(t => t.status !== 'done' && t.status !== 'archived').length
   const fileCount = v.repos.reduce((n, r) => n + (Array.isArray(r.files) ? r.files.length : 0), 0)
   const running = v.works.filter(w => w.status === 'running')
+  // Running jobs first, then what runs next; paused/finished last. (Showing only running jobs left the card
+  // empty while ten jobs were scheduled.)
+  const nextAt = w => (w.status === 'running' ? 0 : num(w.next_run_at) || Number.MAX_SAFE_INTEGER)
+  const upcoming = v.works.filter(w => w.status !== 'done').slice().sort((a, b) => nextAt(a) - nextAt(b))
   const flatFiles = v.repos
     .flatMap(r => (Array.isArray(r.files) ? r.files : []).map(f => ({ ...f, repo: r })))
     .filter(f => matches(s.ui.q, f.path))
@@ -2819,13 +2900,13 @@ function Overview({ s, v }) {
       ),
       h(
         SectionCard,
-        { title: 'Active scheduled jobs', icon: 'history', onMore: () => go('works') },
-        running.length === 0
-          ? h(EmptyState, { icon: 'history', title: 'No scheduled job is running', hint: 'Recurring jobs and runs show up here once they start.' })
+        { title: 'Scheduled jobs', icon: 'history', onMore: () => go('works') },
+        upcoming.length === 0
+          ? h(EmptyState, { icon: 'history', title: 'No scheduled jobs', hint: 'Jobs you schedule (Scheduled tab or a Bot) show up here, running ones first.' })
           : h(
               'ul',
               { className: 'ah-rows' },
-              running.slice(0, 5).map(w =>
+              upcoming.slice(0, 5).map(w =>
                 h(
                   'li',
                   { key: `${w.kind}-${w.id}` },
@@ -2833,7 +2914,12 @@ function Overview({ s, v }) {
                     'button',
                     { type: 'button', className: 'ah-row ah-state', onClick: () => go('works') },
                     h('span', { className: 'ah-kind-icon' }, h(Icon, { name: KIND_ICON[w.kind] || 'play', size: 16 })),
-                    h('span', { className: 'ah-row-body' }, h('span', { className: 'ah-row-title' }, w.title), h('span', { className: 'ah-row-sub' }, `${agentName(s, w.agent)}, ${KIND_LABEL[w.kind] || w.kind}`)),
+                    h(
+                      'span',
+                      { className: 'ah-row-body' },
+                      h('span', { className: 'ah-row-title' }, w.title),
+                      h('span', { className: 'ah-row-sub' }, `${agentName(s, w.agent)}, ${w.status !== 'running' && w.next_run_at ? `next ${relTime(w.next_run_at, s.now)}` : KIND_LABEL[w.kind] || w.kind}`)
+                    ),
                     h(StatusChip, { status: w.status })
                   )
                 )
@@ -6239,7 +6325,12 @@ function HubPage() {
   let body
 
   if (backendOff) {
-    body = h('div', { className: 'ah-pad' }, h(ErrorState, { message: BACKEND_OFF, detail: s.agents.error, onRetry: () => void load() }))
+    const pb = backendProblem(s.agents.error)
+    body = h(
+      'div',
+      { className: 'ah-pad' },
+      h(ErrorState, { message: pb.title, detail: `${pb.hint}\n\nDetails: ${s.agents.error || 'unknown error'}`, onRetry: () => void load() })
+    )
   } else if (tab === 'chat') {
     body = h(ChatView, { key: s.ui.agent, s })
   } else if (tab === 'overview') {
@@ -6256,6 +6347,7 @@ function HubPage() {
     body = h(Changes, { s, v })
   }
 
+  const stale = backendStale(s)
   const split = !backendOff && (tab === 'conversations' || tab === 'changes')
   const board = !backendOff && tab === 'tasks'
   const chat = !backendOff && tab === 'chat'
@@ -6272,6 +6364,14 @@ function HubPage() {
         'div',
         { className: 'ah-content' },
         h(Tabs, { s }),
+        stale && !backendOff
+          ? h(
+              'div',
+              { className: 'ah-banner is-warn', role: 'status' },
+              h(Icon, { name: 'warning', size: 16 }),
+              h('span', null, `${stale} Restart the gateway to finish the update (Ctrl+K, "Restart gateway").`)
+            )
+          : null,
         h('div', { key: tab, role: 'tabpanel', id: `ah-panel-${tab}`, 'aria-labelledby': `ah-tab-${tab}`, className: cx('ah-panel', (split || chat) && 'is-split', board && 'is-board', chat && 'is-chat'), tabIndex: -1 }, body)
       )
     )
@@ -7262,6 +7362,8 @@ const CSS = `
    Buttons inside them stay unselectable so clicks and drags behave as before. */
 .ah-root .ah-stream,.ah-root .ah-stream *,.ah-root .ah-transcript,.ah-root .ah-transcript *,.ah-root .ah-hpanel,.ah-root .ah-hpanel *,.ah-root .ah-detail,.ah-root .ah-detail *,.ah-root .ah-side-preview,.ah-root .ah-side-preview *,.ah-root .ah-diff,.ah-root .ah-diff *,.ah-root .ah-cmd-out,.ah-root .ah-cmd-out *,.ah-root .ah-cmd-body,.ah-root .ah-cmd-body *,.ah-root .ah-approval,.ah-root .ah-approval *,.ah-root .ah-goal-title,.ah-root .ah-goal-title *,.ah-root .ah-table,.ah-root .ah-table *,.ah-root .ah-md,.ah-root .ah-md *,.ah-root .ah-tc-pre,.ah-root .ah-tc-pre *,.ah-root .ah-automsg-body,.ah-root .ah-automsg-body *,.ah-root .ah-file-view,.ah-root .ah-file-view *,.ah-root .ah-preview,.ah-root .ah-preview *{-webkit-user-select:text;user-select:text}
 .ah-root .ah-stream button,.ah-root .ah-stream button *,.ah-root .ah-stream [role=button],.ah-root .ah-transcript button,.ah-root .ah-transcript button *,.ah-root .ah-transcript [role=button],.ah-root .ah-hpanel button,.ah-root .ah-hpanel button *,.ah-root .ah-hpanel [role=button],.ah-root .ah-detail button,.ah-root .ah-detail button *,.ah-root .ah-detail [role=button],.ah-root .ah-side-preview button,.ah-root .ah-side-preview button *,.ah-root .ah-side-preview [role=button],.ah-root .ah-diff button,.ah-root .ah-diff button *,.ah-root .ah-diff [role=button],.ah-root .ah-cmd-out button,.ah-root .ah-cmd-out button *,.ah-root .ah-cmd-out [role=button],.ah-root .ah-cmd-body button,.ah-root .ah-cmd-body button *,.ah-root .ah-cmd-body [role=button],.ah-root .ah-approval button,.ah-root .ah-approval button *,.ah-root .ah-approval [role=button],.ah-root .ah-goal-title button,.ah-root .ah-goal-title button *,.ah-root .ah-goal-title [role=button],.ah-root .ah-table button,.ah-root .ah-table button *,.ah-root .ah-table [role=button],.ah-root .ah-md button,.ah-root .ah-md button *,.ah-root .ah-md [role=button],.ah-root .ah-tc-pre button,.ah-root .ah-tc-pre button *,.ah-root .ah-tc-pre [role=button],.ah-root .ah-automsg-body button,.ah-root .ah-automsg-body button *,.ah-root .ah-automsg-body [role=button],.ah-root .ah-file-view button,.ah-root .ah-file-view button *,.ah-root .ah-file-view [role=button],.ah-root .ah-preview button,.ah-root .ah-preview button *,.ah-root .ah-preview [role=button],.ah-root .ah-dl-no,.ah-root .ah-dl-sign{-webkit-user-select:none;user-select:none}
+.ah-root .ah-banner{display:flex;align-items:center;gap:8px;margin:8px 16px 0;padding:8px 12px;border-radius:10px;font-size:13px;line-height:1.4}
+.ah-root .ah-banner.is-warn{background:color-mix(in srgb,#f59e0b 14%,transparent);color:var(--foreground);border:1px solid color-mix(in srgb,#f59e0b 45%,transparent)}
 .ah-root .ah-dl{display:grid;grid-template-columns:48px 48px 20px minmax(0,1fr)}
 .ah-root .ah-dl.is-hunk,.ah-root .ah-dl.is-meta{grid-template-columns:minmax(0,1fr)}
 .ah-root .ah-dl-no{padding:0 8px;text-align:right;color:var(--ah-on-surface-variant);user-select:none;border-right:1px solid color-mix(in srgb,var(--ah-outline-variant) 60%,transparent)}

@@ -6,12 +6,14 @@
 # Options (env vars or flags):
 #   --repo <owner/repo|git url|file://path>   AGENTS_HUB_REPO   source (default mynamezxc/hermes-agent-hub)
 #   --force                                   AGENTS_HUB_FORCE=1 reinstall over a copy that was not installed from git
-#   --restart                                 AGENTS_HUB_RESTART=1 restart the Hermes gateway when done
+#   --no-restart                              AGENTS_HUB_RESTART=0 do not restart the Hermes gateway when done
+#                                             (by default it restarts after an install or update so the backend loads;
+#                                             a restart interrupts agents that are running at that moment)
 set -euo pipefail
 
 REPO="${AGENTS_HUB_REPO:-mynamezxc/hermes-agent-hub}"
 FORCE="${AGENTS_HUB_FORCE:-0}"
-RESTART="${AGENTS_HUB_RESTART:-0}"
+RESTART="${AGENTS_HUB_RESTART:-1}"
 NAME="agents-hub"
 
 while [ $# -gt 0 ]; do
@@ -19,6 +21,7 @@ while [ $# -gt 0 ]; do
     --repo) REPO="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --restart) RESTART=1; shift ;;
+    --no-restart) RESTART=0; shift ;;
     -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
@@ -66,13 +69,18 @@ fi
   || die "$NAME did not end up enabled. Check: hermes plugins list"
 say "$NAME is installed and enabled"
 
-# 4. Restart the gateway so the dashboard routes load.
+# 4. Restart the gateway so the new backend loads (the page reloads by itself, the backend does not).
 if [ "$RESTART" = "1" ]; then
-  say "Restarting the Hermes gateway"
-  "$HERMES" gateway restart || warn "Gateway restart failed; restart it yourself (Desktop: Ctrl+K, Restart gateway)."
+  say "Restarting the Hermes gateway so the Agents Hub backend loads (running agents are interrupted)"
+  if "$HERMES" gateway restart; then
+    say "Gateway restarted"
+  else
+    warn "Gateway restart failed; restart it yourself (Desktop: Ctrl+K, Restart gateway)."
+  fi
 else
   say "Next: restart the gateway (Desktop: Ctrl+K, \"Restart gateway\"; CLI: hermes gateway restart)."
 fi
-say "Then turn on the desktop half ONCE: Hermes Desktop > Settings > Plugins (or Capabilities > Plugins) > Agents Hub > Desktop on."
-say "  (Desktop keeps a package's desktop half off until you enable it; --enable only covers the agent half.)"
+say "Then, ONCE, turn on the desktop half: Hermes Desktop > Settings > Plugins (or Capabilities > Plugins) > Agents Hub > Desktop on."
+say "  (Desktop keeps a package's desktop half off until you enable it; --enable only covers the agent half."
+say "   Installing from Hermes Desktop itself - Plugins > Install from Git - switches both halves on.)"
 say "Open Agents Hub from the sidebar or press Ctrl+Alt+H. Not there? Ctrl+K > Reload desktop plugins."

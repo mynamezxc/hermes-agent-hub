@@ -637,8 +637,19 @@ class TeamSetupUsageTest(unittest.TestCase):
             (self.home / "profiles" / junk).mkdir(parents=True)
         self.m.ensure_setup()
         self.assertNotIn(".deleted", self.m.list_agents())
+        # a roster written by an older version that listed .deleted is cleaned up
+        team = self.m.load_team()
+        team[".deleted"] = {"name": ".deleted", "avatar": "x"}
+        self.m._save_team(team)
+        self.m.ensure_setup()
         self.assertFalse(any(a.startswith(".") for a in self.m.load_team()))
         self.assertIn("writer", self.m.list_agents())
+
+    def test_health_reports_version(self):
+        h = self.m.health()
+        self.assertTrue(h["ok"])
+        self.assertRegex(h["version"], r"^\d+\.\d+\.\d+$")
+        self.assertGreaterEqual(h["agents"], 1)
 
     def test_staged_image_only_from_agent_cache(self):
         imgs = self.home / "cache" / "images"
@@ -781,6 +792,16 @@ class InstallerScriptTest(unittest.TestCase):
         self.assertFalse(code[0].lstrip().lower().startswith("param("), "top-level param() is not iex-safe")
         self.assertFalse(any(re.search(r"(^|[;{\s])exit(\s|$|;)", l) for l in code), "exit would close the user's shell")
         self.assertNotIn("<#", raw.decode("ascii"))
+
+
+    @unittest.skipUnless((API.parent.parent / "desktop" / "plugin.js").exists(), "desktop half ships in the repo only")
+    def test_page_version_matches_plugin_yaml(self):
+        import re
+        root = API.parent.parent
+        page = re.search(r"const PLUGIN_VERSION = '([^']+)'", (root / "desktop" / "plugin.js").read_text(encoding="utf-8"))
+        yaml_v = re.search(r"^version:\s*['\"]?([^'\"\s]+)", (root / "plugin.yaml").read_text(encoding="utf-8"), re.M)
+        self.assertIsNotNone(page)
+        self.assertEqual(page.group(1), yaml_v.group(1), "bump PLUGIN_VERSION in desktop/plugin.js with plugin.yaml")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
