@@ -1,8 +1,8 @@
 /**
  * Agents Hub — Hermes desktop plugin (disk, plain ESM, no JSX).
  *
- * One full page at /hub: agents rail + tabs (Trò chuyện for a selected agent, or
- * Tổng quan; Hội thoại, Schedules, Tasks, Thay đổi) with a diff viewer and a
+ * One full page at /hub: agents rail + tabs (Chat for a selected agent, or
+ * Overview; Conversations, Schedules, Tasks, Changes) with a diff viewer and a
  * merged per-agent chat timeline with a composer. Read-only; data comes from the backend
  * plugin at /api/plugins/agents-hub through ctx.rest. Styling is Material 3,
  * scoped under .ah-root and derived from host CSS variables with color-mix()
@@ -28,7 +28,7 @@ const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
 const BACKEND_OFF =
-  'Backend Agents Hub chưa bật — thêm agents-hub vào plugins.enabled rồi khởi động lại gateway'
+  'Agents Hub backend is not enabled: add agents-hub to plugins.enabled, then restart the gateway'
 
 /* ───────────────────────── tiny element helper ───────────────────────── */
 
@@ -59,13 +59,13 @@ function Icon({ name, size, spinning, className }) {
 /* ───────────────────────── labels & formatters ───────────────────────── */
 
 const TABS = [
-  { id: 'chat', label: 'Trò chuyện', icon: 'comment' },
-  { id: 'overview', label: 'Tổng quan', icon: 'dashboard' },
-  { id: 'conversations', label: 'Hội thoại', icon: 'comment-discussion' },
-  { id: 'works', label: 'Schedules', icon: 'history' },
+  { id: 'chat', label: 'Chat', icon: 'comment' },
+  { id: 'overview', label: 'Overview', icon: 'dashboard' },
+  { id: 'conversations', label: 'Conversations', icon: 'comment-discussion' },
+  { id: 'works', label: 'Scheduled', icon: 'history' },
   { id: 'tasks', label: 'Tasks', icon: 'checklist' },
-  { id: 'changes', label: 'Thay đổi', icon: 'git-compare' },
-  { id: 'config', label: 'Cấu hình', icon: 'settings-gear' }
+  { id: 'changes', label: 'Changes', icon: 'git-compare' },
+  { id: 'config', label: 'Settings', icon: 'settings-gear' }
 ]
 
 // With an agent selected the hub is a chat with that agent; without one it is the overview.
@@ -88,43 +88,43 @@ function agentColor(id) {
 }
 
 const TASK_COLUMNS = [
-  { id: 'triage', label: 'Phân loại' },
-  { id: 'todo', label: 'Cần làm' },
-  { id: 'ready', label: 'Sẵn sàng' },
-  { id: 'running', label: 'Đang chạy' },
-  { id: 'blocked', label: 'Bị chặn' },
-  { id: 'done', label: 'Hoàn tất' }
+  { id: 'triage', label: 'Triage' },
+  { id: 'todo', label: 'To do' },
+  { id: 'ready', label: 'Ready' },
+  { id: 'running', label: 'Running' },
+  { id: 'blocked', label: 'Blocked' },
+  { id: 'done', label: 'Done' }
 ]
 
 const AGENT_STATUS = {
-  active: { label: 'Đang hoạt động', tone: 'ok' },
-  idle: { label: 'Đang rảnh', tone: 'neutral' },
-  offline: { label: 'Ngoại tuyến', tone: 'off' }
+  active: { label: 'Active', tone: 'ok' },
+  idle: { label: 'Idle', tone: 'neutral' },
+  offline: { label: 'Offline', tone: 'off' }
 }
 
 const KIND_LABEL = {
-  delegation: 'Ủy quyền',
+  delegation: 'Delegation',
   kanban: 'Kanban',
-  cross_profile: 'Giữa profile',
-  cron: 'Định kỳ',
-  run: 'Lượt chạy'
+  cross_profile: 'Cross-profile',
+  cron: 'Recurring',
+  run: 'Run'
 }
 
 const STATUS_LABEL = {
-  running: 'Đang chạy',
-  done: 'Hoàn tất',
-  failed: 'Thất bại',
-  scheduled: 'Đã lên lịch',
-  pending: 'Đang chờ',
-  paused: 'Tạm dừng',
-  idle: 'Đang rảnh',
-  ok: 'Thành công',
-  success: 'Thành công',
-  completed: 'Hoàn tất',
-  error: 'Lỗi',
-  blocked: 'Bị chặn',
-  queued: 'Trong hàng đợi',
-  stopped: 'Đã ngừng'
+  running: 'Running',
+  done: 'Done',
+  failed: 'Failed',
+  scheduled: 'Scheduled',
+  pending: 'Pending',
+  paused: 'Paused',
+  idle: 'Idle',
+  ok: 'Succeeded',
+  success: 'Succeeded',
+  completed: 'Done',
+  error: 'Error',
+  blocked: 'Blocked',
+  queued: 'Queued',
+  stopped: 'Stopped'
 }
 
 const STATUS_TONE = {
@@ -145,18 +145,18 @@ const STATUS_TONE = {
 }
 
 const FILE_STATUS = {
-  M: { label: 'Đã sửa', tone: 'info' },
-  A: { label: 'Thêm mới', tone: 'ok' },
-  D: { label: 'Đã xóa', tone: 'err' },
-  R: { label: 'Đổi tên', tone: 'warn' },
-  '?': { label: 'Chưa theo dõi', tone: 'neutral' }
+  M: { label: 'Modified', tone: 'info' },
+  A: { label: 'Added', tone: 'ok' },
+  D: { label: 'Deleted', tone: 'err' },
+  R: { label: 'Renamed', tone: 'warn' },
+  '?': { label: 'Untracked', tone: 'neutral' }
 }
 
 const KIND_ICON = { cron: 'history', run: 'play', delegation: 'send' }
 
 function relTime(ts, now) {
   if (ts === null || ts === undefined || Number.isNaN(Number(ts))) {
-    return 'Chưa có'
+    return 'Never'
   }
 
   const diff = Math.round((now || Date.now()) / 1000 - Number(ts))
@@ -166,20 +166,20 @@ function relTime(ts, now) {
   let text
 
   if (abs < 10) {
-    return future ? 'ngay bây giờ' : 'vừa xong'
+    return future ? 'right now' : 'just now'
   } else if (abs < 60) {
-    text = `${abs} giây`
+    text = `${abs} sec`
   } else if (abs < 3600) {
-    text = `${Math.floor(abs / 60)} phút`
+    text = `${Math.floor(abs / 60)} min`
   } else if (abs < 86400) {
-    text = `${Math.floor(abs / 3600)} giờ`
+    text = `${Math.floor(abs / 3600)} hr`
   } else if (abs < 86400 * 30) {
-    text = `${Math.floor(abs / 86400)} ngày`
+    text = `${Math.floor(abs / 86400)} days`
   } else {
-    text = `${Math.floor(abs / (86400 * 30))} tháng`
+    text = `${Math.floor(abs / (86400 * 30))} months`
   }
 
-  return future ? `sau ${text}` : `${text} trước`
+  return future ? `in ${text}` : `${text} ago`
 }
 
 function absTime(ts) {
@@ -188,7 +188,7 @@ function absTime(ts) {
   }
 
   try {
-    return new Date(Number(ts) * 1000).toLocaleString('vi-VN')
+    return new Date(Number(ts) * 1000).toLocaleString()
   } catch {
     return ''
   }
@@ -241,7 +241,7 @@ const matches = (q, ...fields) => {
   return !needle || fields.some(f => String(f ?? '').toLowerCase().includes(needle))
 }
 
-const errText = err => (err && err.message ? String(err.message) : String(err || 'Lỗi không xác định'))
+const errText = err => (err && err.message ? String(err.message) : String(err || 'Unknown error'))
 
 const dirOf = p => (String(p).includes('/') ? String(p).slice(0, String(p).lastIndexOf('/')) : '')
 const baseOf = p => String(p).slice(String(p).lastIndexOf('/') + 1)
@@ -288,6 +288,7 @@ function initialState(saved) {
     cmdOut: {},
     usage: {},
     providers: {},
+    queue: {},
     team: null,
     preview: {},
     live: {},
@@ -384,6 +385,19 @@ const ENDPOINTS = {
   changes: '/changes'
 }
 
+const REST_TIMEOUT_MS = 20000
+
+function withTimeout(promise, ms) {
+  let timer
+
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Request timed out after ${Math.round(ms / 1000)}s`)), ms)
+    })
+  ]).finally(() => clearTimeout(timer))
+}
+
 function load() {
   if (!C) {
     return Promise.resolve()
@@ -404,11 +418,18 @@ function load() {
 
   inflight = Promise.all(
     Object.entries(ENDPOINTS).map(async ([key, path]) => {
+      // Await into a local first: emit() replaces S, so `S[key] = f(await …)` would write to a stale store.
+      // Each section renders as soon as its own data lands; a hung request times out instead of
+      // keeping the whole hub (and every later refresh) on skeletons.
       try {
-        S[key] = res('ready', await C.rest(path))
+        const data = await withTimeout(C.rest(path), REST_TIMEOUT_MS)
+
+        S[key] = res('ready', data)
       } catch (err) {
         S[key] = res('error', S[key].data, errText(err))
       }
+
+      emit()
     })
   )
     .then(async () => {
@@ -436,7 +457,8 @@ function load() {
         jobs.push(fetchDiff(repo, file))
       }
 
-      await Promise.all(jobs)
+      // follow-ups must not hold the refresh lock: cap the wait
+      await withTimeout(Promise.all(jobs), REST_TIMEOUT_MS).catch(() => {})
     })
     .finally(() => {
       inflight = null
@@ -609,7 +631,7 @@ const allTimelineItems = agent => {
 
 async function rp(agent, method, params, fg = true) {
   if (typeof host.requestProfile !== 'function') {
-    throw new Error('Phiên bản Hermes Desktop này chưa hỗ trợ gọi agent từ Agents Hub.')
+    throw new Error('This Hermes Desktop version cannot call agents from Agents Hub.')
   }
 
   return host.requestProfile(agent, method, params || {}, undefined, fg ? FG : undefined)
@@ -698,7 +720,7 @@ async function ensureRuntime(agent, { create = false, fg = false } = {}) {
     const runtime = r && r.session_id
 
     if (!runtime) {
-      throw new Error('Gateway không trả về mã phiên chạy.')
+      throw new Error('The gateway returned no runtime session id.')
     }
 
     setLive(agent, { runtime, stored: (chat && chat.session_id) || r.stored_session_id || null, info: r.info || null, seq: 0, epoch: null, primed: false, errors: 0 })
@@ -836,7 +858,7 @@ function reduceTurn(turn, ev, now) {
     case 'session.usage':
       return t ? { ...t, usage: p.usage || p } : turn
     case 'error':
-      return t ? { ...t, error: String(p.message || p.error || 'Lỗi không xác định') } : turn
+      return t ? { ...t, error: String(p.message || p.error || 'Unknown error') } : turn
     case 'message.complete':
       return t ? { ...t, active: false, phase: 'done', endedMs: now, error: p.error ? String(p.error) : t.error, status: '' } : turn
     default:
@@ -912,7 +934,7 @@ function applyEvents(agent, events, { force = false } = {}) {
   }
 }
 
-async function finishTurn(agent) {
+async function finishTurn(agent, { drain = true } = {}) {
   await fetchTimeline(agent)
 
   const lv = liveOf(agent)
@@ -929,6 +951,10 @@ async function finishTurn(agent) {
 
   void fetchWorkspace(agent)
   void fetchChatMeta(agent)
+
+  if (drain) {
+    drainQueue(agent)
+  }
 }
 
 const pollingAgents = new Set()
@@ -1071,7 +1097,7 @@ async function rewindTo(agent, m, text, paths) {
     const bad = (restored.results || []).filter(r => !r.ok)
 
     if (bad.length) {
-      throw new Error(`Không khôi phục được ${bad.length} tệp: ${bad.map(b => `${baseOf(b.path)} (${b.error || b.method})`).join(', ')}`)
+      throw new Error(`Could not restore ${bad.length} files: ${bad.map(b => `${baseOf(b.path)} (${b.error || b.method})`).join(', ')}`)
     }
   }
 
@@ -1169,7 +1195,7 @@ async function answerApproval(agent, req, choice) {
   const lv = liveOf(agent)
 
   if (!lv || !lv.runtime) {
-    throw new Error('Phiên chạy của agent chưa sẵn sàng, thử lại sau giây lát.')
+    throw new Error('The agent’s session is not ready yet; try again in a moment.')
   }
 
   if (choice === '30m') {
@@ -1341,18 +1367,18 @@ function openSideFile(agent, path) {
 /* model + reasoning */
 
 const REASONING_LEVELS = [
-  { id: 'none', label: 'Tắt' },
-  { id: 'minimal', label: 'Tối thiểu' },
-  { id: 'low', label: 'Thấp' },
-  { id: 'medium', label: 'Trung bình' },
-  { id: 'high', label: 'Cao' },
-  { id: 'xhigh', label: 'Rất cao' }
+  { id: 'none', label: 'Off' },
+  { id: 'minimal', label: 'Minimal' },
+  { id: 'low', label: 'Low' },
+  { id: 'medium', label: 'Medium' },
+  { id: 'high', label: 'High' },
+  { id: 'xhigh', label: 'Extra high' }
 ]
 
 const reasoningLabel = id => {
   const lv = REASONING_LEVELS.find(x => x.id === String(id || '').toLowerCase())
 
-  return lv ? lv.label : id ? String(id) : 'Mặc định'
+  return lv ? lv.label : id ? String(id) : 'Default'
 }
 
 function currentModel(s, agent) {
@@ -1400,7 +1426,7 @@ async function switchModel(agent, provider, model) {
     let r = await rp(agent, 'config.set', { session_id: runtime, key: 'model', value })
 
     if (r && r.confirm_required) {
-      const ok = typeof window !== 'undefined' && typeof window.confirm === 'function' ? window.confirm(r.confirm_message || `Dùng model ${model}?`) : false
+      const ok = typeof window !== 'undefined' && typeof window.confirm === 'function' ? window.confirm(r.confirm_message || `Use model ${model}?`) : false
 
       if (!ok) {
         setLive(agent, { pendingModel: null })
@@ -1414,7 +1440,7 @@ async function switchModel(agent, provider, model) {
     setLive(agent, cur => ({ pendingModel: null, info: r && r.deferred ? cur.info : { ...(cur.info || {}), model, provider } }))
 
     if (r && r.deferred && typeof host.notify === 'function') {
-      host.notify({ kind: 'info', message: `Agent đang chạy, model ${model} sẽ áp dụng từ lượt sau.` })
+      host.notify({ kind: 'info', message: `The agent is running; model ${model} applies from the next turn.` })
     }
 
     void pollEvents(agent)
@@ -1477,14 +1503,14 @@ async function runSlash(agent, raw, depth = 0) {
     const type = r && r.type
 
     if (type === 'alias' && r.target) {
-      pushCmdLog(agent, { id, text, state: 'done', output: `Chuyển sang /${r.target}`, at: Date.now() / 1000 })
+      pushCmdLog(agent, { id, text, state: 'done', output: `Switch to /${r.target}`, at: Date.now() / 1000 })
       await runSlash(agent, `/${String(r.target).replace(/^\/+/, '')}${arg ? ` ${arg}` : ''}`, depth + 1)
 
       return
     }
 
     if ((type === 'send' || type === 'skill') && r.message) {
-      pushCmdLog(agent, { id, text, state: 'done', output: r.notice || (type === 'skill' ? `Đã nạp skill ${r.name || name}` : 'Đã gửi cho agent'), at: Date.now() / 1000 })
+      pushCmdLog(agent, { id, text, state: 'done', output: r.notice || (type === 'skill' ? `Loaded skill ${r.name || name}` : 'Sent to the agent'), at: Date.now() / 1000 })
       await sendMessage(agent, String(r.message), [], { display: text })
 
       return
@@ -1492,14 +1518,14 @@ async function runSlash(agent, raw, depth = 0) {
 
     if (type === 'prefill' && r.message) {
       drafts[agent] = String(r.message)
-      pushCmdLog(agent, { id, text, state: 'done', output: r.notice || 'Đã điền sẵn nội dung vào ô chat', at: Date.now() / 1000, prefill: String(r.message) })
+      pushCmdLog(agent, { id, text, state: 'done', output: r.notice || 'Filled into the chat box', at: Date.now() / 1000, prefill: String(r.message) })
 
       return
     }
 
     const output = r && (r.output || r.notice || r.message || r.confirm_message)
 
-    pushCmdLog(agent, { id, text, state: r && r.status === 'pending' ? 'run' : 'done', output: output ? String(output) : 'Đã chạy lệnh.', at: Date.now() / 1000 })
+    pushCmdLog(agent, { id, text, state: r && r.status === 'pending' ? 'run' : 'done', output: output ? String(output) : 'Command ran.', at: Date.now() / 1000 })
     void pollEvents(agent)
   } catch (err) {
     pushCmdLog(agent, { id, text, state: 'err', output: errText(err), at: Date.now() / 1000 })
@@ -1522,13 +1548,13 @@ async function stageAttachments(agent, runtime, atts) {
       const r = await rp(agent, 'image.attach_bytes', { session_id: runtime, content_base64: String(att.dataUrl).split(',')[1] || '', filename: att.name })
 
       if (r && r.attached === false) {
-        throw new Error(r.message || `Không đính kèm được ${att.name}`)
+        throw new Error(r.message || `Could not attach ${att.name}`)
       }
     } else {
       const r = await rp(agent, 'file.attach', { session_id: runtime, name: att.name, data_url: att.dataUrl })
 
       if (!r || r.attached === false || !r.ref_text) {
-        throw new Error((r && r.message) || `Không đính kèm được ${att.name}`)
+        throw new Error((r && r.message) || `Could not attach ${att.name}`)
       }
 
       refs.push(r.ref_text)
@@ -1548,7 +1574,7 @@ async function sendMessage(agent, text, attachments = [], { display, truncateRow
   }
 
   if (typeof host.requestProfile !== 'function') {
-    setSend(agent, { error: 'Phiên bản Hermes Desktop này chưa hỗ trợ gửi tin từ Agents Hub.', text: body, attachments: atts })
+    setSend(agent, { error: 'This Hermes Desktop version cannot send messages from Agents Hub.', text: body, attachments: atts })
 
     return
   }
@@ -1577,7 +1603,7 @@ async function sendMessage(agent, text, attachments = [], { display, truncateRow
     const runtime = await ensureRuntime(agent, { create: true, fg: true })
 
     if (!runtime) {
-      throw new Error('Gateway không trả về mã phiên chạy.')
+      throw new Error('The gateway returned no runtime session id.')
     }
 
     if (!alive()) {
@@ -1588,7 +1614,7 @@ async function sendMessage(agent, text, attachments = [], { display, truncateRow
 
     const refs = atts.length ? await stageAttachments(agent, runtime, atts) : []
     const images = atts.some(a => a.kind === 'image')
-    const prompt = [refs.join('\n'), body].filter(Boolean).join('\n\n') || (images ? 'Hãy xem ảnh đính kèm.' : '')
+    const prompt = [refs.join('\n'), body].filter(Boolean).join('\n\n') || (images ? 'Please look at the attached image(s).' : '')
 
     if (!alive()) {
       return
@@ -1636,7 +1662,7 @@ async function pollTick(agent) {
   }
 
   if (Date.now() - st.startedMs > MAX_TURN_MS) {
-    setSend(agent, { busy: false, optimistic: [], phase: null, error: 'Agent chưa trả lời sau 15 phút. Kiểm tra phiên trong khung chat.' })
+    setSend(agent, { busy: false, optimistic: [], phase: null, error: 'No reply from the agent after 15 minutes. Check the session in the chat view.' })
 
     return
   }
@@ -1683,8 +1709,108 @@ async function stopTurn(agent) {
     }
   }
 
-  setLive(agent, cur => ({ turn: cur.turn ? { ...cur.turn, active: false, phase: 'done', status: 'Đã dừng' } : null }))
-  void finishTurn(agent)
+  setLive(agent, cur => ({ turn: cur.turn ? { ...cur.turn, active: false, phase: 'done', status: 'Stopped' } : null }))
+  void finishTurn(agent, { drain: false })
+}
+
+
+/* ── messages typed while the agent works: queue, steer into the running turn, or remove ── */
+
+let queueSeq = 0
+
+function setQueue(agent, items) {
+  S.queue = { ...S.queue, [agent]: items }
+  emit()
+}
+
+function enqueueMessage(agent, text, attachments) {
+  setQueue(agent, [...(S.queue[agent] || []), { id: `q${++queueSeq}`, text, attachments: attachments || [], at: Date.now() }])
+}
+
+function dropQueued(agent, id) {
+  setQueue(agent, (S.queue[agent] || []).filter(x => x.id !== id))
+}
+
+// AIAgent.steer via the gateway: the text rides into the next tool result of the live turn, no new user
+// turn and no interruption. 'rejected' means the agent went idle meanwhile: send it as a normal message.
+async function steerQueued(agent, id) {
+  const item = (S.queue[agent] || []).find(x => x.id === id)
+  const st = S.send[agent] || {}
+  const lv = liveOf(agent)
+  const runtime = st.runtime || (lv && lv.runtime)
+
+  if (!item) {
+    return
+  }
+
+  setQueue(agent, (S.queue[agent] || []).map(x => (x.id === id ? { ...x, steering: true, error: null } : x)))
+
+  try {
+    const r = runtime ? await rp(agent, 'session.steer', { session_id: runtime, text: item.text }) : { status: 'rejected' }
+    const status = r && r.status
+
+    dropQueued(agent, id)
+
+    if (status === 'rejected') {
+      void sendMessage(agent, item.text, item.attachments)
+    } else {
+      setLive(agent, cur => ({ turn: cur.turn ? { ...cur.turn, steers: [...(cur.turn.steers || []), { text: item.text, at: Date.now(), status: status || 'queued' }] } : cur.turn }))
+    }
+  } catch (err) {
+    setQueue(agent, (S.queue[agent] || []).map(x => (x.id === id ? { ...x, steering: false, error: errText(err) } : x)))
+  }
+}
+
+// After a turn ends the next queued message goes out as a normal message (one per turn, like the app's queue).
+function drainQueue(agent) {
+  const items = S.queue[agent] || []
+  const st = S.send[agent] || {}
+
+  if (!items.length || st.busy) {
+    return
+  }
+
+  const [next, ...rest] = items
+
+  setQueue(agent, rest)
+  void sendMessage(agent, next.text, next.attachments)
+}
+
+function QueueTray({ s, agent, running }) {
+  const items = s.queue[agent] || []
+
+  if (!items.length) {
+    return null
+  }
+
+  return h(
+    'div',
+    { className: 'ah-queue', role: 'list', 'aria-label': 'Queued messages' },
+    items.map(it =>
+      h(
+        'div',
+        { key: it.id, className: 'ah-queue-item', role: 'listitem' },
+        h(Icon, { name: 'clock', size: 14, className: 'ah-queue-ic' }),
+        h('span', { className: 'ah-queue-text', title: it.text }, it.text || `${it.attachments.length} attachment(s)`),
+        it.attachments.length ? h('span', { className: 'ah-queue-att' }, h(Icon, { name: 'attach', size: 12 }), String(it.attachments.length)) : null,
+        it.error ? h('span', { className: 'ah-queue-err', title: it.error }, h(Icon, { name: 'warning', size: 12 })) : null,
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'ah-queue-steer ah-state',
+            disabled: !running || it.steering || it.attachments.length > 0 || !it.text.trim(),
+            title: it.attachments.length ? 'Messages with attachments cannot steer; they are sent when the turn ends' : running ? 'Steer: hand this to the agent now, without stopping its work' : 'Sent when the agent is free',
+            onClick: () => void steerQueued(agent, it.id)
+          },
+          it.steering ? h(Icon, { name: 'loading', size: 14, spinning: true }) : h(Icon, { name: 'compass', size: 14 }),
+          'Steer'
+        ),
+        h('button', { type: 'button', className: 'ah-queue-remove ah-state', 'aria-label': 'Remove queued message', title: 'Remove', onClick: () => dropQueued(agent, it.id) }, h(Icon, { name: 'close', size: 14 }))
+      )
+    ),
+    h('span', { className: 'ah-queue-hint' }, running ? 'Queued messages are sent after the current turn. Steer hands one to the agent right away.' : 'Sending queued messages…')
+  )
 }
 
 /* ───────────────────────── shared small components ───────────────────────── */
@@ -1715,7 +1841,7 @@ function Approvals({ s, agent }) {
     return null
   }
 
-  const clock = ts => new Date(ts).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
+  const clock = ts => new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 
   return h(
     'div',
@@ -1725,25 +1851,25 @@ function Approvals({ s, agent }) {
           'p',
           { className: 'ah-allow-chip', role: 'status' },
           h(Icon, { name: 'shield', size: 12 }),
-          `Đang tự cho phép lệnh của ${agentName(s, agent)} đến ${clock(until)}`,
-          h('button', { type: 'button', className: 'ah-link ah-state', onClick: () => setAllowUntil(agent, 0) }, 'Dừng')
+          `Auto-allowing commands from ${agentName(s, agent)} until ${clock(until)}`,
+          h('button', { type: 'button', className: 'ah-link ah-state', onClick: () => setAllowUntil(agent, 0) }, 'Stop')
         )
       : null,
     list.map(req =>
       h(
         'section',
-        { key: req.request_id || req.command, className: 'ah-approval', role: 'alertdialog', 'aria-label': 'Yêu cầu cho phép' },
-        h('div', { className: 'ah-approval-head' }, h(Icon, { name: 'shield', size: 16 }), h('strong', null, `${agentName(s, agent)} xin phép chạy`), h('span', { className: 'ah-spacer' }), h('time', { className: 'ah-side-time' }, relTime(req.at / 1000, s.now))),
+        { key: req.request_id || req.command, className: 'ah-approval', role: 'alertdialog', 'aria-label': 'Permission request' },
+        h('div', { className: 'ah-approval-head' }, h(Icon, { name: 'shield', size: 16 }), h('strong', null, `${agentName(s, agent)} asks to run`), h('span', { className: 'ah-spacer' }), h('time', { className: 'ah-side-time' }, relTime(req.at / 1000, s.now))),
         req.command ? h('pre', { className: 'ah-approval-cmd ah-mono' }, req.command) : null,
         req.description ? h('p', { className: 'ah-approval-why' }, req.description) : null,
         h(
           'div',
           { className: 'ah-approval-acts' },
-          h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: !!busy, onClick: () => void answer(req, 'once') }, h(Icon, { name: 'check', size: 14 }), 'Cho phép'),
-          h('button', { type: 'button', className: 'ah-btn ah-btn-outlined ah-btn-sm ah-state', disabled: !!busy, title: 'Hermes nhớ lựa chọn này cho phiên chat hiện tại (goal đang làm)', onClick: () => void answer(req, 'session') }, h(Icon, { name: 'target', size: 14 }), 'Luôn cho phép trong goal này'),
-          h('button', { type: 'button', className: 'ah-btn ah-btn-outlined ah-btn-sm ah-state', disabled: !!busy, title: `Tự cho phép mọi yêu cầu của agent này trong ${ALLOW_MINUTES} phút tới (khi Agents Hub đang mở)`, onClick: () => void answer(req, '30m') }, h(Icon, { name: 'watch', size: 14 }), `Cho phép ${ALLOW_MINUTES} phút`),
+          h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: !!busy, onClick: () => void answer(req, 'once') }, h(Icon, { name: 'check', size: 14 }), 'Allow'),
+          h('button', { type: 'button', className: 'ah-btn ah-btn-outlined ah-btn-sm ah-state', disabled: !!busy, title: 'Hermes remembers this for the current chat session (the goal in progress)', onClick: () => void answer(req, 'session') }, h(Icon, { name: 'target', size: 14 }), 'Always allow in this goal'),
+          h('button', { type: 'button', className: 'ah-btn ah-btn-outlined ah-btn-sm ah-state', disabled: !!busy, title: `Auto-allow every request from this agent for the next ${ALLOW_MINUTES} minutes (while Agents Hub is open)`, onClick: () => void answer(req, '30m') }, h(Icon, { name: 'watch', size: 14 }), `Allow ${ALLOW_MINUTES} min`),
           h('span', { className: 'ah-spacer' }),
-          h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state ah-btn-danger', disabled: !!busy, onClick: () => void answer(req, 'deny') }, h(Icon, { name: 'close', size: 14 }), 'Từ chối')
+          h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state ah-btn-danger', disabled: !!busy, onClick: () => void answer(req, 'deny') }, h(Icon, { name: 'close', size: 14 }), 'Deny')
         )
       )
     ),
@@ -1753,7 +1879,7 @@ function Approvals({ s, agent }) {
 
 /* ── agent faces ── */
 
-const MOOD_LABEL = { working: 'Đang tập trung làm việc', happy: 'Vui vẻ', waiting: 'Đang đợi lệnh', asking: 'Đang hỏi Sếp', thinking: 'Đang suy nghĩ', sleep: 'Ngoại tuyến', error: 'Gặp lỗi' }
+const MOOD_LABEL = { working: 'Focused, working', happy: 'Happy', waiting: 'Waiting for orders', asking: 'Asking you', thinking: 'Thinking', sleep: 'Offline', error: 'Hit an error' }
 
 // What the agent's face shows: a pending question beats live work, which beats its plain status.
 function moodOf(s, agent) {
@@ -1913,13 +2039,13 @@ function Chip({ tone = 'neutral', icon, children, title }) {
 function StatusChip({ status }) {
   const key = String(status || '').toLowerCase()
 
-  return h(Chip, { tone: STATUS_TONE[key] || 'neutral' }, STATUS_LABEL[key] || status || 'Không rõ')
+  return h(Chip, { tone: STATUS_TONE[key] || 'neutral' }, STATUS_LABEL[key] || status || 'Unknown')
 }
 
 function Skeleton({ rows = 4, className }) {
   return h(
     'div',
-    { className: cx('ah-skel-wrap', className), 'aria-busy': 'true', 'aria-label': 'Đang tải' },
+    { className: cx('ah-skel-wrap', className), 'aria-busy': 'true', 'aria-label': 'Loading' },
     Array.from({ length: rows }, (_, i) => h('div', { key: i, className: 'ah-skel', style: { width: `${92 - ((i * 13) % 35)}%` } }))
   )
 }
@@ -1931,7 +2057,7 @@ function ErrorState({ message, detail, onRetry, compactMode }) {
     h('span', { className: 'ah-state-icon is-err' }, h(Icon, { name: 'warning', size: 24 })),
     h('p', { className: 'ah-state-title' }, message),
     detail ? h('p', { className: 'ah-state-detail' }, detail) : null,
-    onRetry ? h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-state', onClick: onRetry }, 'Thử lại') : null
+    onRetry ? h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-state', onClick: onRetry }, 'Retry') : null
   )
 }
 
@@ -1982,7 +2108,7 @@ function AppBar({ s }) {
   const failed = s.agents.status === 'error'
   const ago = s.fetchedAt ? relTime(s.fetchedAt / 1000, s.now) : null
 
-  const liveText = failed ? 'Mất kết nối backend' : ago ? `Cập nhật ${ago}` : 'Đang kết nối'
+  const liveText = failed ? 'Backend disconnected' : ago ? `Updated ${ago}` : 'Connecting'
 
   return h(
     'header',
@@ -1998,12 +2124,12 @@ function AppBar({ s }) {
     h(
       'label',
       { className: 'ah-search' },
-      h('span', { className: 'ah-sr' }, 'Tìm trong tab hiện tại'),
+      h('span', { className: 'ah-sr' }, 'Search this tab'),
       h(Icon, { name: 'search', size: 16 }),
       h('input', {
         type: 'search',
         value: ui.q,
-        placeholder: 'Tìm kiếm',
+        placeholder: 'Search',
         autoComplete: 'off',
         onChange: e => {
           S.ui = { ...S.ui, q: e.target.value }
@@ -2016,8 +2142,8 @@ function AppBar({ s }) {
       {
         type: 'button',
         className: 'ah-icon-btn ah-state',
-        'aria-label': 'Làm mới dữ liệu',
-        title: 'Làm mới dữ liệu',
+        'aria-label': 'Refresh',
+        title: 'Refresh',
         disabled: s.refreshing,
         'aria-busy': s.refreshing ? 'true' : 'false',
         onClick: () => void load()
@@ -2199,10 +2325,10 @@ function Markdown({ text }) {
 /* ───────────────────────── agents rail ───────────────────────── */
 
 const RAIL_GROUPS = [
-  { id: 'lead', label: 'Điều hành' },
-  { id: 'eng', label: 'Kỹ thuật' },
-  { id: 'biz', label: 'Kinh doanh và vận hành' },
-  { id: 'other', label: 'Khác' }
+  { id: 'lead', label: 'Leadership' },
+  { id: 'eng', label: 'Engineering' },
+  { id: 'biz', label: 'Business & operations' },
+  { id: 'other', label: 'Other' }
 ]
 
 const LEAD_ORDER = ['default', 'manager', 'tech-lead']
@@ -2247,9 +2373,9 @@ function Rail({ s }) {
   if (s.agents.status === 'loading' || (s.agents.status === 'idle' && !s.agents.data)) {
     body = h(Skeleton, { rows: 6, className: 'ah-rail-skel' })
   } else if (s.agents.status === 'error' && agents.length === 0) {
-    body = h('p', { className: 'ah-rail-note' }, 'Chưa tải được danh sách agent.')
+    body = h('p', { className: 'ah-rail-note' }, 'Could not load the agent list.')
   } else if (shown.length === 0) {
-    body = h('p', { className: 'ah-rail-note' }, 'Không có agent khớp từ khóa.')
+    body = h('p', { className: 'ah-rail-note' }, 'No agent matches.')
   } else {
     body = groupAgents(shown).map(g =>
       h(
@@ -2263,7 +2389,7 @@ function Rail({ s }) {
           const lvA = s.live[a.id]
           const liveTurn = lvA && lvA.turn && lvA.turn.active ? lvA.turn : null
           const liveModel = lvA && lvA.info && lvA.info.model
-          const meta = liveTurn ? (PHASES[liveTurn.phase] || PHASES.thinking).label : `${liveModel || a.model ? `${liveModel || a.model} \u00b7 ` : ''}${num(a.messages_24h)} tin nhắn/24h`
+          const meta = liveTurn ? (PHASES[liveTurn.phase] || PHASES.thinking).label : `${liveModel || a.model ? `${liveModel || a.model} \u00b7 ` : ''}${num(a.messages_24h)} msgs/24h`
 
           return h(
             'button',
@@ -2285,7 +2411,7 @@ function Rail({ s }) {
               h('span', { className: 'ah-agent-role' }, a.role || a.id),
               h('span', { className: cx('ah-agent-meta', liveTurn && 'is-live'), title: a.provider || undefined }, meta)
             ),
-            cmdCount(s, a.id) ? h('span', { className: 'ah-agent-cmds', title: `${cmdCount(s, a.id)} lệnh đang chạy` }, h(Icon, { name: 'terminal', size: 12 }), cmdCount(s, a.id)) : null
+            cmdCount(s, a.id) ? h('span', { className: 'ah-agent-cmds', title: `${cmdCount(s, a.id)} running commands` }, h(Icon, { name: 'terminal', size: 12 }), cmdCount(s, a.id)) : null
           )
         })
       )
@@ -2294,7 +2420,7 @@ function Rail({ s }) {
 
   return h(
     'nav',
-    { className: 'ah-rail', 'aria-label': 'Danh sách agent' },
+    { className: 'ah-rail', 'aria-label': 'Agents' },
     h(
       'div',
       { className: 'ah-rail-head' },
@@ -2308,12 +2434,12 @@ function Rail({ s }) {
         'data-nav': '',
         className: cx('ah-agent ah-agent-all ah-state', !ui.agent && 'is-selected'),
         'aria-pressed': !ui.agent ? 'true' : 'false',
-        'aria-label': 'Tất cả agent, không lọc',
-        title: 'Tất cả agent',
+        'aria-label': 'All agents, no filter',
+        title: 'All agents',
         onClick: () => setUi({ agent: null })
       },
       h('span', { className: 'ah-avatar is-all', style: { '--ah-size': '40px' }, 'aria-hidden': 'true' }, h(Icon, { name: 'organization', size: 20 })),
-      h('span', { className: 'ah-agent-body' }, h('span', { className: 'ah-agent-name' }, 'Tất cả agent'), h('span', { className: 'ah-agent-role' }, 'Không lọc'))
+      h('span', { className: 'ah-agent-body' }, h('span', { className: 'ah-agent-name' }, 'All agents'), h('span', { className: 'ah-agent-role' }, 'No filter'))
     ),
     h('div', { className: 'ah-rail-list', onKeyDown: navKeys }, body)
   )
@@ -2366,7 +2492,7 @@ function Tabs({ s }) {
 
   return h(
     'div',
-    { className: 'ah-tabs', role: 'tablist', 'aria-label': 'Nội dung Agents Hub', onKeyDown: onKey },
+    { className: 'ah-tabs', role: 'tablist', 'aria-label': 'Agents Hub sections', onKeyDown: onKey },
     tabs.map(t => {
       const selected = tab === t.id
       const count = counts[t.id]
@@ -2398,10 +2524,10 @@ function Tabs({ s }) {
             {
               type: 'button',
               className: 'ah-chip is-filter ah-state',
-              'aria-label': `Bỏ lọc agent ${agentName(s, s.ui.agent)}`,
+              'aria-label': `Clear agent filter ${agentName(s, s.ui.agent)}`,
               onClick: () => setUi({ agent: null })
             },
-            h('span', null, `Lọc: ${agentName(s, s.ui.agent)}`),
+            h('span', null, `Filter: ${agentName(s, s.ui.agent)}`),
             h(Icon, { name: 'close', size: 14 })
           )
         )
@@ -2427,7 +2553,7 @@ function SectionCard({ title, icon, onMore, children }) {
       h(Icon, { name: icon, size: 18 }),
       h('h3', { className: 'ah-card-title' }, title),
       h('span', { className: 'ah-spacer' }),
-      onMore ? h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-state', onClick: onMore }, 'Xem tất cả') : null
+      onMore ? h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-state', onClick: onMore }, 'View all') : null
     ),
     children
   )
@@ -2463,7 +2589,7 @@ function useViews(s) {
   }, [s.agents, s.conversations, s.works, s.tasks, s.changes, sel, q])
 }
 
-const GOAL_ACTION = { add: 'Thêm', done: 'Hoàn thành', edit: 'Sửa', delete: 'Xóa', drop: 'Bỏ', reopen: 'Mở lại', current: 'Đặt hiện tại' }
+const GOAL_ACTION = { add: 'Add', done: 'Complete', edit: 'Edit', delete: 'Delete', drop: 'Drop', reopen: 'Reopen', current: 'Set current' }
 const GOAL_ACTION_ICON = { add: 'add', done: 'pass-filled', edit: 'edit', delete: 'trash', drop: 'circle-slash', reopen: 'debug-restart', current: 'target' }
 
 function GoalsOverview({ s }) {
@@ -2481,11 +2607,11 @@ function GoalsOverview({ s }) {
     { className: 'ah-grid-2' },
     h(
       SectionCard,
-      { title: 'Goal hiện tại', icon: 'target' },
+      { title: 'Current goals', icon: 'target' },
       !d
-        ? h('p', { className: 'ah-row-sub' }, s.goalsHistory && s.goalsHistory.status === 'error' ? `Không tải được goal (${s.goalsHistory.error}).` : 'Đang tải…')
+        ? h('p', { className: 'ah-row-sub' }, s.goalsHistory && s.goalsHistory.status === 'error' ? `Could not load goals (${s.goalsHistory.error}).` : 'Loading…')
         : current.length === 0
-          ? h(EmptyState, { icon: 'target', title: 'Chưa agent nào có goal', hint: 'Agent tự đặt goal khi Sếp giao việc trong chat.' })
+          ? h(EmptyState, { icon: 'target', title: 'No agent has a goal yet', hint: 'Agents set goals themselves when you give them work in chat.' })
           : h(
               'ul',
               { className: 'ah-rows' },
@@ -2497,7 +2623,7 @@ function GoalsOverview({ s }) {
                     'button',
                     { type: 'button', className: 'ah-row ah-state', onClick: () => openChat(g.agent) },
                     h(Avatar, { id: g.agent, name: agentName(s, g.agent), size: 32, mood: moodOf(s, g.agent) }),
-                    h('span', { className: 'ah-row-body' }, h('span', { className: 'ah-row-title' }, g.title), h('span', { className: 'ah-row-sub' }, `${agentName(s, g.agent)} · ${g.open} goal đang mở`)),
+                    h('span', { className: 'ah-row-body' }, h('span', { className: 'ah-row-title' }, g.title), h('span', { className: 'ah-row-sub' }, `${agentName(s, g.agent)} · ${g.open} open goals`)),
                     h(Icon, { name: 'target', size: 14 })
                   )
                 )
@@ -2506,9 +2632,9 @@ function GoalsOverview({ s }) {
     ),
     h(
       SectionCard,
-      { title: 'Lịch sử goal', icon: 'history' },
+      { title: 'Goal history', icon: 'history' },
       events.length === 0
-        ? h(EmptyState, { icon: 'history', title: 'Chưa có lịch sử goal', hint: 'Mỗi lần goal được thêm, sửa, hoàn thành hay xóa sẽ ghi ở đây.' })
+        ? h(EmptyState, { icon: 'history', title: 'No goal history yet', hint: 'Every goal added, edited, completed or deleted is logged here.' })
         : h(
             'ul',
             { className: 'ah-rows ah-goal-hist' },
@@ -2520,7 +2646,7 @@ function GoalsOverview({ s }) {
                   'button',
                   { type: 'button', className: 'ah-row ah-state', onClick: () => openChat(e.agent) },
                   h('span', { className: cx('ah-kind-icon', `is-goal-${e.action}`) }, h(Icon, { name: GOAL_ACTION_ICON[e.action] || 'target', size: 16 })),
-                  h('span', { className: 'ah-row-body' }, h('span', { className: 'ah-row-title' }, `${GOAL_ACTION[e.action] || e.action}: ${e.title}`), h('span', { className: 'ah-row-sub' }, `${agentName(s, e.agent)} · ${e.by === 'agent' ? 'agent tự cập nhật' : 'Sếp'} · ${relTime(e.at, s.now)}`))
+                  h('span', { className: 'ah-row-body' }, h('span', { className: 'ah-row-title' }, `${GOAL_ACTION[e.action] || e.action}: ${e.title}`), h('span', { className: 'ah-row-sub' }, `${agentName(s, e.agent)} · ${e.by === 'agent' ? 'updated by the agent' : 'You'} · ${relTime(e.at, s.now)}`))
                 )
               )
             )
@@ -2550,10 +2676,10 @@ function Overview({ s, v }) {
     h(
       'div',
       { className: 'ah-tiles' },
-      h(Tile, { icon: 'pulse', label: 'Agent đang hoạt động', value: `${active}/${v.agents.length}`, hint: `${v.agents.length - active} agent đang rảnh hoặc ngoại tuyến` }),
-      h(Tile, { icon: 'comment-discussion', label: 'Hội thoại trong 24 giờ', value: String(conv24), hint: `${v.conversations.length} hội thoại gần đây`, onClick: () => go('conversations') }),
-      h(Tile, { icon: 'checklist', label: 'Task đang mở', value: String(open), hint: `${v.tasks.length} task tổng cộng`, onClick: () => go('tasks') }),
-      h(Tile, { icon: 'git-compare', label: 'Tệp đã thay đổi', value: String(fileCount), hint: `${v.repos.length} kho mã nguồn`, onClick: () => go('changes') })
+      h(Tile, { icon: 'pulse', label: 'Active agents', value: `${active}/${v.agents.length}`, hint: `${v.agents.length - active} agents idle or offline` }),
+      h(Tile, { icon: 'comment-discussion', label: 'Conversations in 24h', value: String(conv24), hint: `${v.conversations.length} recent conversations`, onClick: () => go('conversations') }),
+      h(Tile, { icon: 'checklist', label: 'Open tasks', value: String(open), hint: `${v.tasks.length} tasks in total`, onClick: () => go('tasks') }),
+      h(Tile, { icon: 'git-compare', label: 'Changed files', value: String(fileCount), hint: `${v.repos.length} repositories`, onClick: () => go('changes') })
     ),
     h(GoalsOverview, { s }),
     h(
@@ -2561,9 +2687,9 @@ function Overview({ s, v }) {
       { className: 'ah-grid-3' },
       h(
         SectionCard,
-        { title: 'Hội thoại gần đây', icon: 'comment-discussion', onMore: () => go('conversations') },
+        { title: 'Recent conversations', icon: 'comment-discussion', onMore: () => go('conversations') },
         v.conversations.length === 0
-          ? h(EmptyState, { icon: 'comment-discussion', title: 'Chưa có hội thoại giữa các agent', hint: 'Hội thoại xuất hiện khi một agent ủy quyền việc cho agent khác.' })
+          ? h(EmptyState, { icon: 'comment-discussion', title: 'No agent-to-agent conversations yet', hint: 'They appear when one agent delegates work to another.' })
           : h(
               'ul',
               { className: 'ah-rows' },
@@ -2575,7 +2701,7 @@ function Overview({ s, v }) {
                     'button',
                     { type: 'button', className: 'ah-row ah-state', onClick: () => setUi({ tab: 'conversations', conv: { profile: c.profile, session_id: c.session_id } }) },
                     h(Avatar, { id: c.from_agent, name: agentName(s, c.from_agent), size: 32 }),
-                    h('span', { className: 'ah-row-body' }, h('span', { className: 'ah-row-title' }, c.title || `${c.from_agent} và ${c.to_agent}`), h('span', { className: 'ah-row-sub' }, `${agentName(s, c.from_agent)} gửi ${agentName(s, c.to_agent)}, ${relTime(c.started_at, s.now)}`)),
+                    h('span', { className: 'ah-row-body' }, h('span', { className: 'ah-row-title' }, c.title || `${c.from_agent} and ${c.to_agent}`), h('span', { className: 'ah-row-sub' }, `${agentName(s, c.from_agent)} sent ${agentName(s, c.to_agent)}, ${relTime(c.started_at, s.now)}`)),
                     h(StatusChip, { status: c.status })
                   )
                 )
@@ -2584,9 +2710,9 @@ function Overview({ s, v }) {
       ),
       h(
         SectionCard,
-        { title: 'Schedules đang chạy', icon: 'history', onMore: () => go('works') },
+        { title: 'Active scheduled jobs', icon: 'history', onMore: () => go('works') },
         running.length === 0
-          ? h(EmptyState, { icon: 'history', title: 'Không có schedule nào đang chạy', hint: 'Lịch định kỳ và lượt chạy sẽ hiện ở đây khi bắt đầu.' })
+          ? h(EmptyState, { icon: 'history', title: 'No scheduled job is running', hint: 'Recurring jobs and runs show up here once they start.' })
           : h(
               'ul',
               { className: 'ah-rows' },
@@ -2607,9 +2733,9 @@ function Overview({ s, v }) {
       ),
       h(
         SectionCard,
-        { title: 'Tệp thay đổi', icon: 'git-compare', onMore: () => go('changes') },
+        { title: 'Changed files', icon: 'git-compare', onMore: () => go('changes') },
         flatFiles.length === 0
-          ? h(EmptyState, { icon: 'git-compare', title: 'Không có tệp nào thay đổi', hint: 'Các kho đang theo dõi đều sạch.' })
+          ? h(EmptyState, { icon: 'git-compare', title: 'No changed files', hint: 'All tracked repositories are clean.' })
           : h(
               'ul',
               { className: 'ah-rows' },
@@ -2649,7 +2775,7 @@ function Conversations({ s, v }) {
   const meta = items.find(c => convKey(c) === currentKey)
 
   if (s.conversations.status === 'error' && items.length === 0) {
-    return h(ErrorState, { message: 'Không tải được hội thoại', detail: s.conversations.error, onRetry: () => void load() })
+    return h(ErrorState, { message: 'Could not load conversations', detail: s.conversations.error, onRetry: () => void load() })
   }
 
   if (s.conversations.status !== 'ready' && !s.conversations.data) {
@@ -2662,8 +2788,8 @@ function Conversations({ s, v }) {
       { className: 'ah-inset' },
       h(EmptyState, {
         icon: 'comment-discussion',
-        title: s.ui.agent || s.ui.q ? 'Không có hội thoại khớp bộ lọc' : 'Chưa có hội thoại giữa các agent',
-        hint: s.ui.agent || s.ui.q ? 'Bỏ lọc agent hoặc đổi từ khóa tìm kiếm.' : 'Hội thoại xuất hiện khi một agent ủy quyền việc cho agent khác.'
+        title: s.ui.agent || s.ui.q ? 'No conversation matches the filter' : 'No agent-to-agent conversations yet',
+        hint: s.ui.agent || s.ui.q ? 'Clear the agent filter or change the search.' : 'They appear when one agent delegates work to another.'
       })
     )
   }
@@ -2675,7 +2801,7 @@ function Conversations({ s, v }) {
     { className: 'ah-split' },
     h(
       'ul',
-      { className: 'ah-master', 'aria-label': 'Danh sách hội thoại', onKeyDown: navKeys },
+      { className: 'ah-master', 'aria-label': 'Conversation list', onKeyDown: navKeys },
       items.map(c => {
         const on = convKey(c) === currentKey
 
@@ -2691,19 +2817,19 @@ function Conversations({ s, v }) {
               'aria-current': on ? 'true' : undefined,
               onClick: () => setUi({ conv: { profile: c.profile, session_id: c.session_id } })
             },
-            h('span', { className: 'ah-conv-title' }, c.title || 'Không có tiêu đề'),
+            h('span', { className: 'ah-conv-title' }, c.title || 'Untitled'),
             h(
               'span',
               { className: 'ah-conv-line' },
-              h('span', { className: 'ah-conv-names' }, `Từ ${agentName(s, c.from_agent)} tới ${agentName(s, c.to_agent)}`),
+              h('span', { className: 'ah-conv-names' }, `From ${agentName(s, c.from_agent)} to ${agentName(s, c.to_agent)}`),
               h('time', { className: 'ah-conv-time', title: absTime(c.started_at) }, relTime(c.started_at, s.now))
             ),
-            h('span', { className: 'ah-conv-chips' }, h(Chip, { tone: 'flat' }, KIND_LABEL[c.kind] || c.kind), h(StatusChip, { status: c.status }), h('span', { className: 'ah-conv-count' }, `${num(c.message_count)} tin nhắn`))
+            h('span', { className: 'ah-conv-chips' }, h(Chip, { tone: 'flat' }, KIND_LABEL[c.kind] || c.kind), h(StatusChip, { status: c.status }), h('span', { className: 'ah-conv-count' }, `${num(c.message_count)} messages`))
           )
         )
       })
     ),
-    h('section', { className: 'ah-detail', 'aria-label': 'Nội dung hội thoại' }, h(Transcript, { s, meta, detail, current }))
+    h('section', { className: 'ah-detail', 'aria-label': 'Conversation' }, h(Transcript, { s, meta, detail, current }))
   )
 }
 
@@ -2770,7 +2896,7 @@ function prettyArgs(args) {
 
 function ToolCall({ uid, call, result }) {
   const [open, setOpen] = useState(false)
-  const name = call.name || 'công cụ'
+  const name = call.name || 'tools'
   const args = call.args && typeof call.args === 'object' ? call.args : {}
   const isTerm = name === 'terminal' && typeof args.command === 'string'
   const summary = isTerm ? `$ ${args.command}` : call.summary || ''
@@ -2792,10 +2918,10 @@ function ToolCall({ uid, call, result }) {
       ? h(
           'div',
           { id, className: 'ah-tc-body' },
-          argText ? h('div', { className: 'ah-tc-label' }, isTerm ? 'Lệnh' : 'Tham số') : null,
+          argText ? h('div', { className: 'ah-tc-label' }, isTerm ? 'Commands' : 'Arguments') : null,
           argText ? h('pre', { className: 'ah-tc-pre ah-mono' }, argText) : null,
-          h('div', { className: 'ah-tc-label' }, 'Kết quả'),
-          result ? h('pre', { className: 'ah-tc-pre ah-tc-result ah-mono' }, prettyText(result.content) || '(trống)') : h('p', { className: 'ah-tc-none' }, 'Chưa có kết quả cho bước này.')
+          h('div', { className: 'ah-tc-label' }, 'Result'),
+          result ? h('pre', { className: 'ah-tc-pre ah-tc-result ah-mono' }, prettyText(result.content) || '(empty)') : h('p', { className: 'ah-tc-none' }, 'No result for this step yet.')
         )
       : null
   )
@@ -2819,8 +2945,8 @@ function ToolGroup({ uid, calls, steps, resultById }) {
       { type: 'button', className: 'ah-tg-head ah-state', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': gid, onClick: () => setOpen(!open) },
       h(Icon, { name: open ? 'chevron-down' : 'chevron-right', size: 14 }),
       h(Icon, { name: calls.length === 1 ? toolIcon(calls[0].name) : 'tools', size: 14 }),
-      h('span', { className: 'ah-auto-tag' }, 'Agent tự chạy'),
-      h('span', { className: 'ah-tg-title' }, list.length > 1 ? `${list.length} bước` : 'Bước 1', ` · ${calls.length} công cụ`),
+      h('span', { className: 'ah-auto-tag' }, 'Agent worked on its own'),
+      h('span', { className: 'ah-tg-title' }, list.length > 1 ? `${list.length} steps` : 'Step 1', ` · ${calls.length} tools`),
       h('span', { className: cx('ah-tg-names', !last.label && 'ah-mono') }, lastLabel)
     ),
     open
@@ -2837,7 +2963,7 @@ function ToolGroup({ uid, calls, steps, resultById }) {
                 'button',
                 { type: 'button', className: 'ah-step-head ah-state', 'aria-expanded': so ? 'true' : 'false', onClick: () => setOpenStep({ ...openStep, [i]: !so }) },
                 h(Icon, { name: so ? 'chevron-down' : 'chevron-right', size: 12 }),
-                h('span', { className: 'ah-step-n' }, `Bước ${i + 1}`),
+                h('span', { className: 'ah-step-n' }, `Step ${i + 1}`),
                 h('span', { className: 'ah-step-label' }, st.label || callLabel(st.calls[0])),
                 h('span', { className: 'ah-step-tools' }, Array.from(new Set(st.calls.map(c => c.name))).slice(0, 3).join(', '))
               ),
@@ -2861,15 +2987,15 @@ function OrphanResults({ uid, items }) {
       { type: 'button', className: 'ah-tg-head ah-state', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': id, onClick: () => setOpen(!open) },
       h(Icon, { name: open ? 'chevron-down' : 'chevron-right', size: 14 }),
       h(Icon, { name: 'output', size: 14 }),
-      h('span', { className: 'ah-auto-tag' }, 'Tự động'),
-      h('span', { className: 'ah-tg-title' }, 'Kết quả công cụ'),
-      h('span', { className: 'ah-tg-names' }, `${items.length} kết quả`)
+      h('span', { className: 'ah-auto-tag' }, 'Auto'),
+      h('span', { className: 'ah-tg-title' }, 'Tool results'),
+      h('span', { className: 'ah-tg-names' }, `${items.length} results`)
     ),
     open
       ? h(
           'div',
           { id, className: 'ah-tg-list' },
-          items.map((m, i) => h('div', { key: `${m.id}-${i}`, className: 'ah-tc is-open' }, h('div', { className: 'ah-tc-body' }, h('div', { className: 'ah-tc-label' }, m.tool_name || 'công cụ'), h('pre', { className: 'ah-tc-pre ah-tc-result ah-mono' }, prettyText(m.content) || '(trống)'))))
+          items.map((m, i) => h('div', { key: `${m.id}-${i}`, className: 'ah-tc is-open' }, h('div', { className: 'ah-tc-body' }, h('div', { className: 'ah-tc-label' }, m.tool_name || 'tools'), h('pre', { className: 'ah-tc-pre ah-tc-result ah-mono' }, prettyText(m.content) || '(empty)'))))
         )
       : null
   )
@@ -3015,22 +3141,22 @@ function MsgTime({ ts, s }) {
 }
 
 const AUTO_ICON = {
-  'Tiến trình nền kết thúc': 'server-process',
-  'Kết quả giao việc nền': 'organization',
-  'Đổi model': 'hubot',
-  'Tác vụ định kỳ': 'history',
-  'Tóm tắt ngữ cảnh': 'fold'
+  'Background process finished': 'server-process',
+  'Background task result': 'organization',
+  'Model switch': 'hubot',
+  'Scheduled job': 'history',
+  'Context compacted': 'fold'
 }
 
 // Fallback when the backend is older than the `auto` field: same prefixes as plugin_api.auto_label.
 const AUTO_PREFIXES = [
-  ['[CONTEXT COMPACTION', 'Tóm tắt ngữ cảnh'],
-  ['[IMPORTANT: Background process', 'Tiến trình nền kết thúc'],
-  ['[IMPORTANT:', 'Thông báo hệ thống'],
-  ['[INTERNAL NOTIFICATION', 'Thông báo hệ thống'],
-  ['[ASYNC DELEGATION', 'Kết quả giao việc nền'],
-  ['[System', 'Ghi chú hệ thống'],
-  ['[SYSTEM', 'Ghi chú hệ thống']
+  ['[CONTEXT COMPACTION', 'Context compacted'],
+  ['[IMPORTANT: Background process', 'Background process finished'],
+  ['[IMPORTANT:', 'System notice'],
+  ['[INTERNAL NOTIFICATION', 'System notice'],
+  ['[ASYNC DELEGATION', 'Background task result'],
+  ['[System', 'System note'],
+  ['[SYSTEM', 'System note']
 ]
 
 function autoOf(m) {
@@ -3050,8 +3176,22 @@ function autoOf(m) {
 
 // A user-role row the owner did not type (gateway notice, background result, cron prompt...):
 // collapsed by default, clearly tagged, never styled like the owner's own bubble.
+const COMPACTION_LABEL = 'Context compacted'
+
 function AutoMessage({ m, s }) {
   const [open, setOpen] = useState(false)
+
+  // Context compaction: one quiet line, nothing to expand (the summary is for the model, not the owner).
+  if (m.auto === COMPACTION_LABEL) {
+    return h(
+      'div',
+      { className: 'ah-automsg is-compact', role: 'note', title: 'Earlier messages were summarized to free up context' },
+      h(Icon, { name: 'fold', size: 14 }),
+      h('span', { className: 'ah-automsg-label' }, COMPACTION_LABEL),
+      m.timestamp ? h('time', { className: 'ah-automsg-time', title: absTime(m.timestamp) }, relTime(m.timestamp, s.now)) : null
+    )
+  }
+
   const id = `ah-auto-${m.session_id || ''}-${m.id}`
   const summary = m.auto_summary || String(m.content || '').split('\n')[0]
 
@@ -3060,15 +3200,15 @@ function AutoMessage({ m, s }) {
     { className: cx('ah-automsg', open && 'is-open') },
     h(
       'button',
-      { type: 'button', className: 'ah-automsg-head ah-state', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': id, title: 'Tin tự động, không phải do bạn gửi từ ô chat', onClick: () => setOpen(!open) },
+      { type: 'button', className: 'ah-automsg-head ah-state', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': id, title: 'Automatic message, not typed by you', onClick: () => setOpen(!open) },
       h(Icon, { name: open ? 'chevron-down' : 'chevron-right', size: 14 }),
       h(Icon, { name: AUTO_ICON[m.auto] || 'bell', size: 14 }),
-      h('span', { className: 'ah-auto-tag' }, 'Tự động'),
+      h('span', { className: 'ah-auto-tag' }, 'Auto'),
       h('span', { className: 'ah-automsg-label' }, m.auto),
       h('span', { className: 'ah-automsg-sum' }, summary),
       m.timestamp ? h('time', { className: 'ah-automsg-time', title: absTime(m.timestamp) }, relTime(m.timestamp, s.now)) : null
     ),
-    open ? h('div', { id, className: 'ah-automsg-body' }, h('pre', { className: 'ah-tc-pre ah-mono' }, m.content || '(trống)')) : null
+    open ? h('div', { id, className: 'ah-automsg-body' }, h('pre', { className: 'ah-tc-pre ah-mono' }, m.content || '(empty)')) : null
   )
 }
 
@@ -3135,7 +3275,7 @@ function MessageStream({ s, entries, mode, agentId, info, renderEntry }) {
   )
 }
 
-const NOT_FOUND_MSG = 'Không tìm thấy hội thoại — có thể đã bị xóa hoặc thuộc profile khác'
+const NOT_FOUND_MSG = 'Conversation not found: it may have been deleted or belong to another profile'
 const isNotFound = text => /404|not\s*found|unknown profile|không tìm thấy/i.test(String(text || ''))
 
 function ConvBody({ s, entry, current, info }) {
@@ -3158,14 +3298,14 @@ function ConvBody({ s, entry, current, info }) {
     const missing = isNotFound(entry.error)
 
     return h(ErrorState, {
-      message: missing ? NOT_FOUND_MSG : 'Không tải được nội dung hội thoại',
+      message: missing ? NOT_FOUND_MSG : 'Could not load the conversation',
       detail: missing ? null : entry.error,
       onRetry: missing ? null : () => void fetchDetail(current)
     })
   }
 
   if (messages.length === 0) {
-    return h(EmptyState, { icon: 'comment', title: 'Hội thoại chưa có tin nhắn', hint: 'Nội dung sẽ hiện khi agent bắt đầu trao đổi.' })
+    return h(EmptyState, { icon: 'comment', title: 'No messages yet', hint: 'Messages appear once the agents start talking.' })
   }
 
   return h('div', { className: 'ah-convbody' }, h(MessageStream, { s, entries, mode: 'agents', info }), h('span', { ref: endRef, className: 'ah-end', 'aria-hidden': 'true' }))
@@ -3182,8 +3322,8 @@ function Transcript({ s, meta, detail, current }) {
       ? h(
           'header',
           { className: 'ah-transcript-head' },
-          h('h2', { className: 'ah-transcript-title' }, info.title || 'Hội thoại'),
-          h('p', { className: 'ah-transcript-sub' }, `Từ ${agentName(s, info.from_agent)} tới ${agentName(s, info.to_agent)}, bắt đầu ${relTime(info.started_at, s.now)}`),
+          h('h2', { className: 'ah-transcript-title' }, info.title || 'Conversations'),
+          h('p', { className: 'ah-transcript-sub' }, `From ${agentName(s, info.from_agent)} to ${agentName(s, info.to_agent)}, started ${relTime(info.started_at, s.now)}`),
           h('div', { className: 'ah-conv-chips' }, h(Chip, { tone: 'flat' }, KIND_LABEL[info.kind] || info.kind), h(StatusChip, { status: info.status }))
         )
       : null,
@@ -3191,14 +3331,14 @@ function Transcript({ s, meta, detail, current }) {
   )
 }
 
-/* ───────────────────────── chat tab (Trò chuyện) ───────────────────────── */
+/* ───────────────────────── chat tab ───────────────────────── */
 
 function HandoffRow({ s, item }) {
   const [open, setOpen] = useState(false)
   const from = item.from_agent
   const to = item.to_agent
   const id = `ah-ho-${item.session_id}`
-  const text = `${agentName(s, from)} đã nhắn cho ${agentName(s, to)}`
+  const text = `${agentName(s, from)} messaged ${agentName(s, to)}`
   const active = s.ui.handoff && convKey(s.ui.handoff) === convKey(item)
 
   return h(
@@ -3218,19 +3358,19 @@ function HandoffRow({ s, item }) {
       ? h(
           'div',
           { id, className: 'ah-handoff-card' },
-          h('p', { className: 'ah-handoff-title' }, item.title || 'Hội thoại giữa các agent'),
+          h('p', { className: 'ah-handoff-title' }, item.title || 'Agent-to-agent conversation'),
           item.summary ? h('p', { className: 'ah-handoff-sum' }, item.summary) : null,
           h(
             'div',
             { className: 'ah-handoff-foot' },
-            h(Chip, { tone: 'flat' }, KIND_LABEL[item.kind] || item.kind || 'Hội thoại'),
-            num(item.message_count) > 0 ? h('span', { className: 'ah-conv-count' }, `${item.message_count} tin nhắn`) : null,
+            h(Chip, { tone: 'flat' }, KIND_LABEL[item.kind] || item.kind || 'Conversations'),
+            num(item.message_count) > 0 ? h('span', { className: 'ah-conv-count' }, `${item.message_count} messages`) : null,
             h('span', { className: 'ah-spacer' }),
             h(
               'button',
               { type: 'button', className: cx('ah-btn ah-btn-tonal ah-btn-sm ah-state', active && 'is-on'), onClick: () => openHandoff(item) },
               h(Icon, { name: 'comment-discussion', size: 16 }),
-              h('span', null, 'Xem toàn bộ')
+              h('span', null, 'View all')
             )
           )
         )
@@ -3243,7 +3383,7 @@ function SessionDivider({ s, item }) {
     'div',
     { className: 'ah-divider', role: 'separator' },
     h('span', { className: 'ah-divider-line' }),
-    h('span', { className: 'ah-divider-label', title: item.source ? `Nguồn: ${item.source}` : undefined }, `Phiên: ${item.title || 'Không có tiêu đề'}, ${relTime(item.started_at, s.now)}`),
+    h('span', { className: 'ah-divider-label', title: item.source ? `Source: ${item.source}` : undefined }, `Session: ${item.title || 'Untitled'}, ${relTime(item.started_at, s.now)}`),
     h('span', { className: 'ah-divider-line' })
   )
 }
@@ -3256,13 +3396,13 @@ function HandoffPanel({ s }) {
 
   return h(
     'aside',
-    { className: 'ah-hpanel', 'aria-label': 'Chi tiết hội thoại giữa các agent' },
+    { className: 'ah-hpanel', 'aria-label': 'Agent-to-agent conversation details' },
     h(
       'header',
       { className: 'ah-hpanel-head' },
-      h('button', { type: 'button', className: 'ah-icon-btn ah-state ah-hpanel-back', 'aria-label': 'Quay lại cuộc trò chuyện', title: 'Quay lại cuộc trò chuyện', onClick: () => setUi({ handoff: null }) }, h(Icon, { name: 'arrow-left', size: 18 })),
-      h('div', { className: 'ah-hpanel-titles' }, h('h2', { className: 'ah-hpanel-title' }, info.title || 'Hội thoại'), h('p', { className: 'ah-hpanel-sub' }, `${agentName(s, info.from_agent)} đã nhắn cho ${agentName(s, info.to_agent)}`)),
-      h('button', { type: 'button', className: 'ah-icon-btn ah-state ah-hpanel-close', 'aria-label': 'Đóng chi tiết', title: 'Đóng chi tiết', onClick: () => setUi({ handoff: null }) }, h(Icon, { name: 'close', size: 18 }))
+      h('button', { type: 'button', className: 'ah-icon-btn ah-state ah-hpanel-back', 'aria-label': 'Back to the chat', title: 'Back to the chat', onClick: () => setUi({ handoff: null }) }, h(Icon, { name: 'arrow-left', size: 18 })),
+      h('div', { className: 'ah-hpanel-titles' }, h('h2', { className: 'ah-hpanel-title' }, info.title || 'Conversations'), h('p', { className: 'ah-hpanel-sub' }, `${agentName(s, info.from_agent)} messaged ${agentName(s, info.to_agent)}`)),
+      h('button', { type: 'button', className: 'ah-icon-btn ah-state ah-hpanel-close', 'aria-label': 'Close details', title: 'Close details', onClick: () => setUi({ handoff: null }) }, h(Icon, { name: 'close', size: 18 }))
     ),
     h('div', { className: 'ah-hpanel-body' }, h(ConvBody, { s, entry, current, info }))
   )
@@ -3275,7 +3415,7 @@ function readDataUrl(file) {
     const fr = new FileReader()
 
     fr.onload = () => resolve(String(fr.result || ''))
-    fr.onerror = () => reject(fr.error || new Error('Không đọc được tệp'))
+    fr.onerror = () => reject(fr.error || new Error('Could not read the file'))
     fr.readAsDataURL(file)
   })
 }
@@ -3310,7 +3450,7 @@ function AttachmentChip({ att, onRemove }) {
     { className: cx('ah-att', att.kind === 'image' && 'is-image'), title: `${att.name} (${fmtBytes(att.size || 0)})` },
     att.kind === 'image' && att.dataUrl ? h('img', { className: 'ah-att-thumb', src: att.dataUrl, alt: '' }) : h('span', { className: 'ah-att-icon' }, h(Icon, { name: attIcon(att), size: 16 })),
     h('span', { className: 'ah-att-body' }, h('span', { className: 'ah-att-name' }, att.name), att.size ? h('span', { className: 'ah-att-size' }, fmtBytes(att.size)) : null),
-    onRemove ? h('button', { type: 'button', className: 'ah-att-x ah-state', 'aria-label': `Bỏ ${att.name}`, title: 'Bỏ tệp này', onClick: onRemove }, h(Icon, { name: 'close', size: 14 })) : null
+    onRemove ? h('button', { type: 'button', className: 'ah-att-x ah-state', 'aria-label': `Drop ${att.name}`, title: 'Remove this file', onClick: onRemove }, h(Icon, { name: 'close', size: 14 })) : null
   )
 }
 
@@ -3330,14 +3470,14 @@ function AttachmentTray({ atts, onRemove }) {
             'span',
             { key: att.id, className: 'ah-thumb', title: `${att.name} (${fmtBytes(att.size || 0)})` },
             h('img', { src: att.dataUrl, alt: att.name }),
-            h('button', { type: 'button', className: 'ah-thumb-x', 'aria-label': `Bỏ ${att.name}`, title: 'Bỏ ảnh này', onClick: () => onRemove(att.id) }, h(Icon, { name: 'close', size: 12 }))
+            h('button', { type: 'button', className: 'ah-thumb-x', 'aria-label': `Drop ${att.name}`, title: 'Remove this image', onClick: () => onRemove(att.id) }, h(Icon, { name: 'close', size: 12 }))
           )
         : h(AttachmentChip, { key: att.id, att, onRemove: () => onRemove(att.id) })
     ),
     more > 0
-      ? h('button', { type: 'button', className: 'ah-thumb ah-thumb-more ah-state', title: `Xem thêm ${more} tệp`, 'aria-label': `Xem thêm ${more} tệp`, onClick: () => setAll(true) }, `+${more}`)
+      ? h('button', { type: 'button', className: 'ah-thumb ah-thumb-more ah-state', title: `Show ${more} more files`, 'aria-label': `Show ${more} more files`, onClick: () => setAll(true) }, `+${more}`)
       : all && ordered.length > ATT_VISIBLE
-        ? h('button', { type: 'button', className: 'ah-thumb ah-thumb-more ah-state', title: 'Thu gọn', 'aria-label': 'Thu gọn', onClick: () => setAll(false) }, h(Icon, { name: 'chevron-up', size: 16 }))
+        ? h('button', { type: 'button', className: 'ah-thumb ah-thumb-more ah-state', title: 'Collapse', 'aria-label': 'Collapse', onClick: () => setAll(false) }, h(Icon, { name: 'chevron-up', size: 16 }))
         : null
   )
 }
@@ -3451,7 +3591,7 @@ function ModelPicker({ s, agent }) {
         className: cx('ah-tool-btn ah-model-btn ah-state', open === 'model' && 'is-open', cur.pending && 'is-pending'),
         'aria-haspopup': 'listbox',
         'aria-expanded': open === 'model' ? 'true' : 'false',
-        title: `Model của agent${cur.live ? ' (đang dùng trong phiên)' : ' (mặc định trong cấu hình)'}: ${cur.provider ? `${cur.provider} / ` : ''}${shownModel || 'chưa rõ'}`,
+        title: `Agent model${cur.live ? ' (in use this session)' : ' (config default)'}: ${cur.provider ? `${cur.provider} / ` : ''}${shownModel || 'unknown'}`,
         onClick: e => toggle('model', e)
       },
       cur.pending ? h(Icon, { name: 'loading', size: 14, spinning: true }) : h(Icon, { name: 'hubot', size: 14 }),
@@ -3465,7 +3605,7 @@ function ModelPicker({ s, agent }) {
         className: cx('ah-tool-btn ah-state', open === 'reason' && 'is-open'),
         'aria-haspopup': 'listbox',
         'aria-expanded': open === 'reason' ? 'true' : 'false',
-        title: `Mức suy luận: ${reasoningLabel(cur.effort)}`,
+        title: `Reasoning: ${reasoningLabel(cur.effort)}`,
         disabled: levels.length === 0,
         onClick: e => toggle('reason', e)
       },
@@ -3476,24 +3616,24 @@ function ModelPicker({ s, agent }) {
     open === 'model'
       ? h(
           'div',
-          { className: 'ah-pop ah-pop-model', role: 'dialog', 'aria-label': 'Chọn model', style: { left } },
+          { className: 'ah-pop ah-pop-model', role: 'dialog', 'aria-label': 'Choose model', style: { left } },
           h(
             'div',
             { className: 'ah-pop-head' },
             h(Icon, { name: 'search', size: 14 }),
-            h('input', { className: 'ah-pop-search', value: q, placeholder: 'Tìm model hoặc nhà cung cấp', autoFocus: true, onChange: e => setQ(e.target.value) }),
-            h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Tải lại danh sách', 'aria-label': 'Tải lại danh sách', onClick: () => void loadModelOptions(agent, { refresh: true }) }, h(Icon, { name: 'sync', size: 14, spinning: !!(opts && opts.status === 'loading') }))
+            h('input', { className: 'ah-pop-search', value: q, placeholder: 'Search models or providers', autoFocus: true, onChange: e => setQ(e.target.value) }),
+            h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Reload list', 'aria-label': 'Reload list', onClick: () => void loadModelOptions(agent, { refresh: true }) }, h(Icon, { name: 'sync', size: 14, spinning: !!(opts && opts.status === 'loading') }))
           ),
-          busy ? h('p', { className: 'ah-pop-note' }, 'Agent đang chạy: model mới áp dụng từ lượt sau.') : null,
+          busy ? h('p', { className: 'ah-pop-note' }, 'The agent is running: the new model applies from the next turn.') : null,
           h(
             'div',
             { className: 'ah-pop-list', role: 'listbox' },
             !opts || (opts.status === 'loading' && !opts.data)
               ? h(Skeleton, { rows: 4, className: 'ah-pop-skel' })
               : opts.status === 'error' && !opts.data
-                ? h('p', { className: 'ah-pop-note is-err' }, opts.error || 'Không tải được danh sách model')
+                ? h('p', { className: 'ah-pop-note is-err' }, opts.error || 'Could not load models')
                 : providers.length === 0
-                  ? h('p', { className: 'ah-pop-note' }, 'Không có model phù hợp.')
+                  ? h('p', { className: 'ah-pop-note' }, 'No matching model.')
                   : providers.map(p => {
                       // Only the provider of the active model starts open; a search opens every match.
                       const isOpen = q.trim() ? true : expanded[p.slug] !== undefined ? expanded[p.slug] : p.current
@@ -3535,19 +3675,19 @@ function ModelPicker({ s, agent }) {
                             },
                             h('span', { className: 'ah-pop-check' }, on ? h(Icon, { name: 'check', size: 14 }) : null),
                             h('span', { className: 'ah-pop-label ah-mono' }, m),
-                            p.caps && p.caps[m] && p.caps[m].reasoning ? h('span', { className: 'ah-pop-tag', title: 'Hỗ trợ suy luận' }, h(Icon, { name: 'lightbulb', size: 12 })) : null
+                            p.caps && p.caps[m] && p.caps[m].reasoning ? h('span', { className: 'ah-pop-tag', title: 'Supports reasoning' }, h(Icon, { name: 'lightbulb', size: 12 })) : null
                           )
                         })
                       )
                     })
           ),
-          h('p', { className: 'ah-pop-foot' }, 'Áp dụng cho phiên chat của agent này. Agent tự đổi model thì lựa chọn ở đây cập nhật theo.')
+          h('p', { className: 'ah-pop-foot' }, 'Applies to this agent’s chat session. If the agent switches model itself, this follows.')
         )
       : null,
     open === 'reason'
       ? h(
           'div',
-          { className: 'ah-pop ah-pop-reason', role: 'listbox', 'aria-label': 'Mức suy luận', style: { left } },
+          { className: 'ah-pop ah-pop-reason', role: 'listbox', 'aria-label': 'Reasoning effort', style: { left } },
           levels.map(l => {
             const on = String(cur.effort || '').toLowerCase() === l.id
 
@@ -3592,7 +3732,8 @@ function Composer({ s, agent, onSent }) {
   const slashSeq = useRef(0)
   const rpc = typeof host.requestProfile === 'function'
   const running = !!st.busy || !!(lv.turn && lv.turn.active)
-  const canSend = rpc && !st.busy && (text.trim().length > 0 || atts.length > 0)
+  const hasPayload = text.trim().length > 0 || atts.length > 0
+  const canSend = rpc && hasPayload && (!st.busy || running)
 
   // A slash command may prefill the draft (type "prefill").
   useEffect(() => {
@@ -3642,7 +3783,7 @@ function Composer({ s, agent, onSent }) {
     const tooBig = arr.filter(f => f.size > MAX_ATTACH_BYTES)
     const ok = arr.filter(f => f.size <= MAX_ATTACH_BYTES).slice(0, Math.max(0, room))
 
-    setNote(tooBig.length ? `Bỏ qua ${tooBig.length} tệp lớn hơn ${fmtBytes(MAX_ATTACH_BYTES)}.` : arr.length > ok.length ? `Tối đa ${MAX_ATTACH} tệp mỗi tin nhắn.` : '')
+    setNote(tooBig.length ? `Skipped ${tooBig.length} files larger than ${fmtBytes(MAX_ATTACH_BYTES)}.` : arr.length > ok.length ? `At most ${MAX_ATTACH} files per message.` : '')
 
     try {
       const read = await Promise.all(ok.map(toAttachment))
@@ -3726,6 +3867,13 @@ function Composer({ s, agent, onSent }) {
 
     onSent()
 
+    if (running) {
+      // the agent is working: queue it (Steer or remove from the tray above the input)
+      enqueueMessage(agent, body, sending)
+
+      return
+    }
+
     if (body.startsWith('/') && sending.length === 0 && !body.includes('\n')) {
       void runSlash(agent, body)
     } else {
@@ -3774,19 +3922,20 @@ function Composer({ s, agent, onSent }) {
     }
   }
 
-  const sendLabel = st.phase === 'upload' ? 'Đang tải tệp lên' : 'Gửi tin nhắn (Enter)'
+  const sendLabel = st.phase === 'upload' ? 'Uploading files' : running ? 'Queue message (Enter): send after this turn or Steer it in' : 'Send message (Enter)'
 
   return h(
     'div',
     { className: 'ah-composer-wrap' },
+    h(QueueTray, { key: 'queue', s, agent, running }),
     h(
       'div',
-      { className: 'ah-composer-col' },
+      { key: 'col', className: 'ah-composer-col' },
       slash.open
         ? h(
             'div',
-            { className: 'ah-slash', role: 'listbox', 'aria-label': 'Lệnh' },
-            h('div', { className: 'ah-slash-head' }, h(Icon, { name: 'symbol-keyword', size: 14 }), h('span', null, 'Lệnh'), h('span', { className: 'ah-spacer' }), h('span', { className: 'ah-slash-hint' }, 'Tab để chọn, Esc để đóng')),
+            { className: 'ah-slash', role: 'listbox', 'aria-label': 'Commands' },
+            h('div', { className: 'ah-slash-head' }, h(Icon, { name: 'symbol-keyword', size: 14 }), h('span', null, 'Commands'), h('span', { className: 'ah-spacer' }), h('span', { className: 'ah-slash-hint' }, 'Tab to pick, Esc to close')),
             h(
               'div',
               { className: 'ah-slash-list' },
@@ -3830,7 +3979,7 @@ function Composer({ s, agent, onSent }) {
         },
         // Stable keys: h() drops nulls, so without them the tray appearing would shift the textarea and remount it (losing its height).
         atts.length ? h(AttachmentTray, { key: 'tray', atts, onRemove: id => setAttachments(atts.filter(x => x.id !== id)) }) : null,
-        h('label', { key: 'label', className: 'ah-sr', htmlFor: 'ah-composer-input' }, `Nhắn cho ${name}`),
+        h('label', { key: 'label', className: 'ah-sr', htmlFor: 'ah-composer-input' }, `Message ${name}`),
         h('textarea', {
           key: 'input',
           id: 'ah-composer-input',
@@ -3839,7 +3988,7 @@ function Composer({ s, agent, onSent }) {
           rows: 1,
           value: text,
           disabled: !rpc,
-          placeholder: `Nhắn cho ${name}, gõ / để xem lệnh, dán hoặc kéo thả ảnh và tệp…`,
+          placeholder: `Message ${name}, type / for commands, paste or drop images and files…`,
           onChange: e => {
             change(e.target.value)
             fit(e.target)
@@ -3851,15 +4000,15 @@ function Composer({ s, agent, onSent }) {
           'div',
           { key: 'bar', className: 'ah-composer-bar' },
           h('input', { ref: fileRef, type: 'file', multiple: true, className: 'ah-sr', tabIndex: -1, 'aria-hidden': 'true', onChange: e => { void addFiles(e.target.files); e.target.value = '' } }),
-          h('button', { type: 'button', className: 'ah-tool-btn ah-tool-icon ah-state', disabled: !rpc || atts.length >= MAX_ATTACH, title: 'Đính kèm ảnh hoặc tệp', 'aria-label': 'Đính kèm ảnh hoặc tệp', onClick: () => fileRef.current && fileRef.current.click() }, h(Icon, { name: 'attach', size: 16 })),
+          h('button', { type: 'button', className: 'ah-tool-btn ah-tool-icon ah-state', disabled: !rpc || atts.length >= MAX_ATTACH, title: 'Attach images or files', 'aria-label': 'Attach images or files', onClick: () => fileRef.current && fileRef.current.click() }, h(Icon, { name: 'attach', size: 16 })),
           h(
             'button',
             {
               type: 'button',
               className: 'ah-tool-btn ah-tool-icon ah-state',
               disabled: !rpc,
-              title: 'Lệnh (gõ /)',
-              'aria-label': 'Mở danh sách lệnh',
+              title: 'Commands (type /)',
+              'aria-label': 'Open the command list',
               onClick: () => {
                 const v = text.startsWith('/') ? text : `/${text}`
 
@@ -3876,7 +4025,7 @@ function Composer({ s, agent, onSent }) {
           rpc ? h(ModelPicker, { s, agent }) : null,
           h('span', { className: 'ah-spacer' }),
           running
-            ? h('button', { type: 'button', className: 'ah-stop ah-state', 'aria-label': 'Dừng agent', title: 'Dừng agent', onClick: () => void stopTurn(agent) }, h(Icon, { name: 'debug-stop', size: 16 }))
+            ? h('button', { type: 'button', className: 'ah-stop ah-state', 'aria-label': 'Stop the agent', title: 'Stop the agent', onClick: () => void stopTurn(agent) }, h(Icon, { name: 'debug-stop', size: 16 }))
             : null,
           h(
             'button',
@@ -3885,17 +4034,17 @@ function Composer({ s, agent, onSent }) {
           )
         )
       ),
-      drag ? h('p', { className: 'ah-composer-note' }, 'Thả để đính kèm.') : null,
+      drag ? h('p', { className: 'ah-composer-note' }, 'Drop to attach.') : null,
       note ? h('p', { className: 'ah-composer-note' }, note) : null,
-      lv.modelError ? h('div', { className: 'ah-composer-error', role: 'alert' }, h(Icon, { name: 'error', size: 16 }), h('span', { className: 'ah-composer-error-text' }, `Không đổi được model hoặc mức suy luận: ${lv.modelError}`)) : null,
-      !rpc ? h('p', { className: 'ah-composer-note' }, 'Phiên bản Hermes Desktop này chưa hỗ trợ gửi tin từ Agents Hub. Hãy cập nhật ứng dụng hoặc dùng nút Mở trong khung chat.') : null,
+      lv.modelError ? h('div', { className: 'ah-composer-error', role: 'alert' }, h(Icon, { name: 'error', size: 16 }), h('span', { className: 'ah-composer-error-text' }, `Could not change model or reasoning: ${lv.modelError}`)) : null,
+      !rpc ? h('p', { className: 'ah-composer-note' }, 'This Hermes Desktop version cannot send messages from Agents Hub. Update the app or use Open in chat.') : null,
       st.error
         ? h(
             'div',
             { className: 'ah-composer-error', role: 'alert' },
             h(Icon, { name: 'error', size: 16 }),
             h('span', { className: 'ah-composer-error-text' }, st.error),
-            st.text || (st.attachments && st.attachments.length) ? h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => void sendMessage(agent, st.text, st.attachments || []) }, 'Thử lại') : null
+            st.text || (st.attachments && st.attachments.length) ? h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => void sendMessage(agent, st.text, st.attachments || []) }, 'Retry') : null
           )
         : null,
       h(UsageBar, { key: 'usage', s, agent })
@@ -3906,13 +4055,13 @@ function Composer({ s, agent, onSent }) {
 /* live turn: what the agent is doing right now */
 
 const PHASES = {
-  waiting: { label: 'Đang chờ agent nhận việc', icon: 'watch' },
-  thinking: { label: 'Đang suy nghĩ', icon: 'sparkle' },
-  reasoning: { label: 'Đang suy luận', icon: 'lightbulb-sparkle' },
-  writing: { label: 'Đang viết trả lời', icon: 'edit' },
-  'tool-gen': { label: 'Đang soạn lệnh', icon: 'code' },
-  tool: { label: 'Đang thực thi', icon: 'terminal' },
-  done: { label: 'Đã xong', icon: 'pass' }
+  waiting: { label: 'Waiting for the agent to pick it up', icon: 'watch' },
+  thinking: { label: 'Thinking', icon: 'sparkle' },
+  reasoning: { label: 'Reasoning', icon: 'lightbulb-sparkle' },
+  writing: { label: 'Writing the reply', icon: 'edit' },
+  'tool-gen': { label: 'Preparing a command', icon: 'code' },
+  tool: { label: 'Executing', icon: 'terminal' },
+  done: { label: 'Done', icon: 'pass' }
 }
 
 const fmtDur = sec => {
@@ -3974,7 +4123,7 @@ function LiveSteps({ turn, showReason, setShowReason, allTools, setAllTools, rea
   return h(
     'div',
     { className: 'ah-live-steps' },
-    hiddenPrev > 0 ? h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => setAllTools(true) }, `Xem thêm ${hiddenPrev} bước trước`) : null,
+    hiddenPrev > 0 ? h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => setAllTools(true) }, `Show ${hiddenPrev} earlier steps`) : null,
     prev.length
       ? h(
           'ol',
@@ -3991,9 +4140,9 @@ function LiveSteps({ turn, showReason, setShowReason, allTools, setAllTools, rea
                 'button',
                 { type: 'button', className: 'ah-step-head ah-state', 'aria-expanded': open ? 'true' : 'false', onClick: () => setOpenStep({ ...openStep, [idx]: !open }) },
                 h(Icon, { name: ts.some(t => t.state === 'err') ? 'error' : 'check', size: 12 }),
-                h('span', { className: 'ah-step-n' }, `Bước ${idx + 1}`),
-                h('span', { className: 'ah-step-label' }, st.label || (ts[0] ? ts[0].name : 'Suy luận')),
-                h('span', { className: 'ah-step-tools' }, ts.length ? `${ts.length} công cụ` : '')
+                h('span', { className: 'ah-step-n' }, `Step ${idx + 1}`),
+                h('span', { className: 'ah-step-label' }, st.label || (ts[0] ? ts[0].name : 'Reasoning')),
+                h('span', { className: 'ah-step-tools' }, ts.length ? `${ts.length} tools` : '')
               ),
               open && ts.length ? h('ol', { className: 'ah-live-tools' }, ts.map(t => h(LiveTool, { key: t.id, tool: t }))) : null
             )
@@ -4008,14 +4157,14 @@ function LiveSteps({ turn, showReason, setShowReason, allTools, setAllTools, rea
           h(
             'div',
             { className: 'ah-step-cur-head' },
-            h('span', { className: 'ah-step-n' }, `Bước ${answer ? n - 1 || 1 : n}`),
-            h('span', { className: cx('ah-step-label', working && 'is-shimmer') }, working ? `Working: ${cur.label || (curTools.length ? curTools[curTools.length - 1].name : 'đang suy luận')}` : (answer ? (prev[prev.length - 1] || {}).label : cur.label) || 'Xong'),
+            h('span', { className: 'ah-step-n' }, `Step ${answer ? n - 1 || 1 : n}`),
+            h('span', { className: cx('ah-step-label', working && 'is-shimmer') }, working ? `Working: ${cur.label || (curTools.length ? curTools[curTools.length - 1].name : 'reasoning')}` : (answer ? (prev[prev.length - 1] || {}).label : cur.label) || 'Xong'),
             cur.reasoning
               ? h(
                   'button',
                   { type: 'button', className: 'ah-live-reason-toggle ah-state', 'aria-expanded': showReason ? 'true' : 'false', onClick: () => setShowReason(!showReason) },
                   h(Icon, { name: showReason ? 'chevron-down' : 'chevron-right', size: 12 }),
-                  h('span', null, 'Suy luận')
+                  h('span', null, 'Reasoning')
                 )
               : null
           ),
@@ -4041,12 +4190,12 @@ function LiveTurn({ s, agent, turn }) {
     }
   }, [turn.reasoning && turn.reasoning.length])
 
-  const ph = turn.active ? PHASES[turn.phase] || PHASES.thinking : turn.error ? { label: 'Lượt chạy gặp lỗi', icon: 'error' } : PHASES.done
+  const ph = turn.active ? PHASES[turn.phase] || PHASES.thinking : turn.error ? { label: 'The turn failed', icon: 'error' } : PHASES.done
   const label = turn.active && turn.phase === 'tool' ? (() => {
     const running = turn.tools.filter(t => t.state === 'run')
 
-    return running.length ? `Đang chạy ${running.map(t => t.name).slice(0, 2).join(', ')}${running.length > 2 ? '…' : ''}` : ph.label
-  })() : turn.active && turn.phase === 'tool-gen' && turn.gen ? `Đang soạn lệnh ${turn.gen}` : ph.label
+    return running.length ? `Running ${running.map(t => t.name).slice(0, 2).join(', ')}${running.length > 2 ? '…' : ''}` : ph.label
+  })() : turn.active && turn.phase === 'tool-gen' && turn.gen ? `Preparing a command ${turn.gen}` : ph.label
   const secs = ((turn.active ? Date.now() : turn.endedMs || Date.now()) - turn.startedMs) / 1000
   const usage = turn.usage || {}
   const tokens = num(usage.output_tokens) || num(usage.completion_tokens)
@@ -4067,12 +4216,13 @@ function LiveTurn({ s, agent, turn }) {
         h('span', { className: cx('ah-live-label', turn.active && 'is-shimmer') }, label),
         turn.active ? h('span', { className: 'ah-dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')) : null,
         h('span', { className: 'ah-spacer' }),
-        tokens ? h('span', { className: 'ah-live-meta', title: 'Token đầu ra của lượt này' }, `${compact(tokens)} token`) : null,
+        tokens ? h('span', { className: 'ah-live-meta', title: 'Output tokens this turn' }, `${compact(tokens)} token`) : null,
         h('span', { className: 'ah-live-meta ah-mono' }, fmtDur(secs))
       ),
       turn.status ? h('p', { className: 'ah-live-status' }, h(Icon, { name: turn.statusKind === 'compacting' ? 'fold' : 'info', size: 12 }), h('span', null, turn.status)) : null,
       turn.active && turn.spin && turn.phase === 'thinking' ? h('p', { className: 'ah-live-spin ah-mono' }, turn.spin) : null,
       h(LiveSteps, { turn, showReason, setShowReason, allTools, setAllTools, reasonRef }),
+      (turn.steers || []).map((st, i) => h('p', { key: `steer${i}`, className: 'ah-live-steer' }, h(Icon, { name: 'compass', size: 12 }), h('b', null, 'Steered'), h('span', null, st.text))),
       turn.error ? h('p', { className: 'ah-live-error' }, turn.error) : null
     )
   )
@@ -4105,7 +4255,7 @@ function WorkItem({ s, agent, it }) {
             h(
               'span',
               { className: 'ah-work-titles' },
-              h('span', { className: cx('ah-work-label', it.active && 'is-shimmer') }, it.active ? 'Đang làm ở phiên khác' : 'Vừa làm ở phiên khác', from ? ` · ${from} giao` : it.source && it.source !== 'tool' ? ` · ${it.source}` : ''),
+              h('span', { className: cx('ah-work-label', it.active && 'is-shimmer') }, it.active ? 'Working in another session' : 'Worked in another session', from ? ` · ${from} giao` : it.source && it.source !== 'tool' ? ` · ${it.source}` : ''),
               h('span', { className: 'ah-work-title', title: it.title }, it.title)
             ),
             h('time', { className: 'ah-side-time', title: absTime(it.last_at) }, relTime(it.last_at, s.now)),
@@ -4143,11 +4293,11 @@ function WorkItem({ s, agent, it }) {
 }
 
 const RB_METHOD = {
-  replay: 'Dựng lại nội dung trước đó',
-  reverse: 'Hoàn tác các lần sửa',
-  delete: 'Xóa (tệp được tạo sau tin này)',
-  unchanged: 'Đã đúng trạng thái, không cần đổi',
-  unknown: 'Không khôi phục được'
+  replay: 'Rebuild the earlier content',
+  reverse: 'Undo the edits',
+  delete: 'Delete (created after this message)',
+  unchanged: 'Already in that state, nothing to change',
+  unknown: 'Could not restore'
 }
 
 // Inline editor for an earlier own message: edit text, choose files to restore, cut the session and resend.
@@ -4215,13 +4365,13 @@ function EditMessage({ s, agent, m, onClose }) {
 
   return h(
     'div',
-    { className: 'ah-edit', role: 'group', 'aria-label': 'Sửa tin nhắn và chạy lại từ đây' },
+    { className: 'ah-edit', role: 'group', 'aria-label': 'Edit the message and rerun from here' },
     h('textarea', {
       ref: taRef,
       className: 'ah-edit-input',
       value: text,
       rows: 2,
-      'aria-label': 'Nội dung tin nhắn',
+      'aria-label': 'Message text',
       onChange: e => {
         setText(e.target.value)
         const ta = e.target
@@ -4237,17 +4387,17 @@ function EditMessage({ s, agent, m, onClose }) {
         }
       }
     }),
-    h('p', { className: 'ah-edit-warn' }, h(Icon, { name: 'warning', size: 12 }), h('span', null, 'Tin này và mọi tin sau nó sẽ bị gỡ khỏi phiên; agent chạy lại từ nội dung mới.')),
+    h('p', { className: 'ah-edit-warn' }, h(Icon, { name: 'warning', size: 12 }), h('span', null, 'This message and everything after it are removed from the session; the agent reruns from the new text.')),
     h(
       'div',
       { className: 'ah-edit-files' },
-      h('span', { className: 'ah-edit-files-head' }, h(Icon, { name: 'history', size: 12 }), 'Khôi phục tệp về thời điểm gửi tin này'),
+      h('span', { className: 'ah-edit-files-head' }, h(Icon, { name: 'history', size: 12 }), 'Restore files to when this message was sent'),
       plan.status === 'loading'
-        ? h('span', { className: 'ah-side-empty' }, 'Đang kiểm tra tệp đã sửa sau tin này…')
+        ? h('span', { className: 'ah-side-empty' }, 'Checking files edited after this message…')
         : plan.status === 'error'
-          ? h('span', { className: 'ah-side-empty' }, `Không kiểm tra được tệp (${plan.error}).`)
+          ? h('span', { className: 'ah-side-empty' }, `Could not check files (${plan.error}).`)
           : plan.files.length === 0
-            ? h('span', { className: 'ah-side-empty' }, 'Agent chưa sửa tệp nào sau tin này.')
+            ? h('span', { className: 'ah-side-empty' }, 'The agent edited no files after this message.')
             : h(
                 'ul',
                 { className: 'ah-edit-flist' },
@@ -4272,17 +4422,17 @@ function EditMessage({ s, agent, m, onClose }) {
     h(
       'div',
       { className: 'ah-edit-actions' },
-      turnBusy ? h('span', { className: 'ah-row-sub' }, 'Đợi agent xong lượt đang chạy.') : null,
+      turnBusy ? h('span', { className: 'ah-row-sub' }, 'Wait for the agent to finish its turn.') : null,
       h('span', { className: 'ah-spacer' }),
-      h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', disabled: busy, onClick: () => onClose(null) }, 'Hủy'),
+      h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', disabled: busy, onClick: () => onClose(null) }, 'Cancel'),
       chosen.length
-        ? h('button', { type: 'button', className: 'ah-btn ah-btn-outlined ah-btn-sm ah-state', disabled: busy || turnBusy, title: 'Chỉ khôi phục tệp, không đổi phiên chat', onClick: () => void run(false) }, `Chỉ khôi phục ${chosen.length} tệp`)
+        ? h('button', { type: 'button', className: 'ah-btn ah-btn-outlined ah-btn-sm ah-state', disabled: busy || turnBusy, title: 'Restore files only, keep the chat', onClick: () => void run(false) }, `Restore only ${chosen.length} files`)
         : null,
       h(
         'button',
         { type: 'button', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: busy || turnBusy || !text.trim(), onClick: () => void run(true) },
         busy ? h(Icon, { name: 'loading', size: 14, spinning: true }) : h(Icon, { name: 'discard', size: 14 }),
-        chosen.length ? `Khôi phục ${chosen.length} tệp & gửi lại` : 'Gửi lại từ đây'
+        chosen.length ? `Restore ${chosen.length} files & resend` : 'Resend from here'
       )
     )
   )
@@ -4303,7 +4453,7 @@ function UserMessage({ s, m, agent }) {
           m,
           onClose: r => {
             setEditing(false)
-            setNote(r === 'restored' ? 'Đã khôi phục tệp.' : null)
+            setNote(r === 'restored' ? 'Files restored.' : null)
           }
         })
       : h(
@@ -4321,7 +4471,7 @@ function UserMessage({ s, m, agent }) {
           canEdit
             ? h(
                 'button',
-                { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-user-edit ah-state', title: 'Sửa & chạy lại từ đây (khôi phục tệp)', 'aria-label': 'Sửa tin nhắn và chạy lại từ đây', onClick: () => setEditing(true) },
+                { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-user-edit ah-state', title: 'Edit & rerun from here (restore files)', 'aria-label': 'Edit the message and rerun from here', onClick: () => setEditing(true) },
                 h(Icon, { name: 'edit', size: 14 })
               )
             : null,
@@ -4561,7 +4711,7 @@ function ChatView({ s }) {
     prevH.current = el.scrollHeight
     stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
 
-    // Scrolling near the top pulls older messages in (no "Tải thêm" button).
+    // Scrolling near the top pulls older messages in (no "Load more" button).
     if (el.scrollTop < LOAD_MORE_PX && tl && tl.has_more && !tl.loadingMore && !tl.moreError) {
       loadMore()
     }
@@ -4603,17 +4753,17 @@ function ChatView({ s }) {
   if (!tl || (tl.status === 'loading' && entries.length === 0)) {
     body = h(Skeleton, { rows: 8, className: 'ah-chat-skel' })
   } else if (tl.status === 'error' && entries.length === 0) {
-    body = h(ErrorState, { message: 'Không tải được cuộc trò chuyện', detail: tl.error, onRetry: () => void fetchTimeline(agent), compactMode: true })
+    body = h(ErrorState, { message: 'Could not load the chat', detail: tl.error, onRetry: () => void fetchTimeline(agent), compactMode: true })
   } else if (entries.length === 0 && !showTurn && cmds.length === 0 && !(s.activity[agent] && s.activity[agent].data && (s.activity[agent].data.items || []).length)) {
-    body = h(EmptyState, { icon: 'comment', title: `Chưa có cuộc trò chuyện với ${name}`, hint: 'Nhập tin nhắn bên dưới để bắt đầu. Gõ / để xem lệnh, dán ảnh hoặc kéo thả tệp để đính kèm.' })
+    body = h(EmptyState, { icon: 'comment', title: `No chat yet with ${name}`, hint: 'Type a message below to start. Type / for commands; paste images or drop files to attach.' })
   } else {
     body = [
       tl.has_more && (tl.loadingMore || tl.moreError)
         ? h(
             'div',
             { key: 'more', className: 'ah-more', role: 'status' },
-            tl.loadingMore ? [h(Icon, { key: 'i', name: 'loading', size: 14, spinning: true }), h('span', { key: 't', className: 'ah-row-sub' }, 'Đang tải tin cũ hơn…')] : null,
-            tl.moreError ? [h('span', { key: 'e', className: 'ah-row-sub' }, `Không tải được tin cũ: ${tl.moreError}. `), h('button', { key: 'r', type: 'button', className: 'ah-link ah-state', onClick: () => { fetchTimelineRetry(agent); loadMore() } }, 'Thử lại')] : null
+            tl.loadingMore ? [h(Icon, { key: 'i', name: 'loading', size: 14, spinning: true }), h('span', { key: 't', className: 'ah-row-sub' }, 'Loading older messages…')] : null,
+            tl.moreError ? [h('span', { key: 'e', className: 'ah-row-sub' }, `Could not load older messages: ${tl.moreError}. `), h('button', { key: 'r', type: 'button', className: 'ah-link ah-state', onClick: () => { fetchTimelineRetry(agent); loadMore() } }, 'Retry')] : null
           )
         : null,
       h(MessageStream, {
@@ -4641,7 +4791,7 @@ function ChatView({ s }) {
     { className: cx('ah-chat', (s.ui.handoff || sideOpen) && 'has-panel', sideOpen && 'has-side', sideOpen && s.ui.sideFile && 'is-wide') },
     h(
       'section',
-      { className: 'ah-chat-main', 'aria-label': `Trò chuyện với ${name}` },
+      { className: 'ah-chat-main', 'aria-label': `Chat with ${name}` },
       h(
         'header',
         { className: 'ah-chat-head' },
@@ -4656,7 +4806,7 @@ function ChatView({ s }) {
             turnLive
               ? h('span', { className: 'ah-head-live' }, h('span', { className: 'ah-pulse', 'aria-hidden': 'true' }), ph.label)
               : workLive
-                ? h('span', { className: 'ah-head-live' }, h('span', { className: 'ah-pulse', 'aria-hidden': 'true' }), `Đang làm: ${workLive.title}`)
+                ? h('span', { className: 'ah-head-live' }, h('span', { className: 'ah-pulse', 'aria-hidden': 'true' }), `Working on: ${workLive.title}`)
                 : a
                 ? `${a.role || a.id}${st ? `, ${st.label.toLowerCase()}` : ''}`
                 : agent,
@@ -4669,11 +4819,11 @@ function ChatView({ s }) {
             type: 'button',
             className: 'ah-btn ah-btn-outlined ah-state',
             disabled: !canOpen,
-            title: chatId ? 'Mở phiên Bot Chat của agent này trong khung chat' : 'Agent này chưa có phiên Bot Chat',
+            title: chatId ? 'Open this agent’s Bot Chat session in the chat view' : 'This agent has no Bot Chat session yet',
             onClick: () => void openChatSession(agent)
           },
           h(Icon, { name: 'link-external', size: 16 }),
-          h('span', { className: 'ah-hide-sm' }, 'Mở trong khung chat')
+          h('span', { className: 'ah-hide-sm' }, 'Open in chat')
         ),
         h(
           'button',
@@ -4681,8 +4831,8 @@ function ChatView({ s }) {
             type: 'button',
             className: cx('ah-icon-btn ah-state', sideOpen && 'is-on'),
             'aria-pressed': sideOpen ? 'true' : 'false',
-            title: sideOpen ? 'Ẩn bảng phiên làm việc' : 'Hiện bảng phiên làm việc',
-            'aria-label': sideOpen ? 'Ẩn bảng phiên làm việc' : 'Hiện bảng phiên làm việc',
+            title: sideOpen ? 'Hide the session panel' : 'Show the session panel',
+            'aria-label': sideOpen ? 'Hide the session panel' : 'Show the session panel',
             onClick: () => setUi({ side: !sideOpen, handoff: null })
           },
           h(Icon, { name: sideOpen ? 'layout-sidebar-right' : 'layout-sidebar-right-off', size: 18 })
@@ -4693,10 +4843,10 @@ function ChatView({ s }) {
         { className: 'ah-chat-body' },
         h(
           'div',
-          { className: 'ah-chat-scroll', ref: scrollRef, onScroll, tabIndex: 0, role: 'log', 'aria-label': 'Dòng thời gian trò chuyện', 'aria-live': 'off' },
+          { className: 'ah-chat-scroll', ref: scrollRef, onScroll, tabIndex: 0, role: 'log', 'aria-label': 'Chat timeline', 'aria-live': 'off' },
           h('div', { className: 'ah-chat-col' }, body)
         ),
-        pill ? h('button', { type: 'button', className: 'ah-newpill ah-state', onClick: jumpBottom }, h(Icon, { name: 'arrow-down', size: 14 }), h('span', null, 'Tin nhắn mới')) : null
+        pill ? h('button', { type: 'button', className: 'ah-newpill ah-state', onClick: jumpBottom }, h(Icon, { name: 'arrow-down', size: 14 }), h('span', null, 'New messages')) : null
       ),
       h(Composer, { s, agent, onSent: () => { stick.current = true; setPill(false) } })
     ),
@@ -4797,13 +4947,13 @@ function FilesSection({ s, agent, data }) {
         'p',
         { className: 'ah-side-empty ah-approved-note' },
         h(Icon, { name: 'pass', size: 12 }),
-        `${approvedN} tệp đã duyệt được ẩn (vẫn quay lui được trong chat). `,
-        h('button', { type: 'button', className: 'ah-link ah-state', disabled: abusy, onClick: () => void approve({ reset: true }) }, 'Hiện lại')
+        `${approvedN} approved files hidden (you can still roll back in chat). `,
+        h('button', { type: 'button', className: 'ah-link ah-state', disabled: abusy, onClick: () => void approve({ reset: true }) }, 'Show again')
       )
     : null
 
   if (files.length === 0) {
-    return h('div', null, h('p', { className: 'ah-side-empty' }, approvedN ? 'Mọi thay đổi đã được duyệt.' : 'Chưa có tệp nào được sửa trong phiên chat này.'), approvedNote, aerr ? h('p', { className: 'ah-live-error' }, aerr) : null)
+    return h('div', null, h('p', { className: 'ah-side-empty' }, approvedN ? 'All changes approved.' : 'No files edited in this chat session yet.'), approvedNote, aerr ? h('p', { className: 'ah-live-error' }, aerr) : null)
   }
 
   const shown = allGroups ? groups : groups.slice(0, SIDE_GROUPS)
@@ -4817,7 +4967,7 @@ function FilesSection({ s, agent, data }) {
       h('input', {
         type: 'checkbox',
         className: 'ah-approve-all-box',
-        'aria-label': 'Chọn tất cả tệp',
+        'aria-label': 'Select all files',
         checked: picked.length > 0 && picked.length === files.length,
         ref: el => {
           if (el) {
@@ -4826,11 +4976,11 @@ function FilesSection({ s, agent, data }) {
         },
         onChange: e => setSel(e.target.checked ? Object.fromEntries(files.map(f => [f.path, true])) : {})
       }),
-      h('span', { className: 'ah-row-sub' }, picked.length ? `Đã chọn ${picked.length}` : `${files.length} tệp chờ duyệt`),
+      h('span', { className: 'ah-row-sub' }, picked.length ? `Selected ${picked.length}` : `${files.length} files to review`),
       h('span', { className: 'ah-spacer' }),
       picked.length
-        ? h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: abusy, title: 'Chấp nhận các thay đổi đã chọn và ẩn khỏi danh sách', onClick: () => void approve({ paths: picked }) }, h(Icon, { name: 'check', size: 14 }), `Duyệt ${picked.length} tệp`)
-        : h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: abusy, title: 'Chấp nhận mọi thay đổi và ẩn khỏi danh sách', onClick: () => void approve({ all: true }) }, h(Icon, { name: 'check-all', size: 14 }), 'Duyệt tất cả')
+        ? h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: abusy, title: 'Accept the selected changes and hide them', onClick: () => void approve({ paths: picked }) }, h(Icon, { name: 'check', size: 14 }), `Approve ${picked.length} files`)
+        : h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: abusy, title: 'Accept every change and hide them', onClick: () => void approve({ all: true }) }, h(Icon, { name: 'check-all', size: 14 }), 'Approve all')
     ),
     aerr ? h('p', { className: 'ah-live-error' }, aerr) : null,
     h(
@@ -4861,7 +5011,7 @@ function FilesSection({ s, agent, data }) {
                 h(
                   'li',
                   { key: f.path, className: 'ah-side-fitem' },
-                  h('input', { type: 'checkbox', className: 'ah-side-fcheck', 'aria-label': `Chọn ${f.name}`, checked: !!sel[f.path], onChange: e => setSel({ ...sel, [f.path]: e.target.checked }) }),
+                  h('input', { type: 'checkbox', className: 'ah-side-fcheck', 'aria-label': `Select ${f.name}`, checked: !!sel[f.path], onChange: e => setSel({ ...sel, [f.path]: e.target.checked }) }),
                   h(
                     'button',
                     {
@@ -4872,7 +5022,7 @@ function FilesSection({ s, agent, data }) {
                     },
                     h(FileBadge, { status: f.status }),
                     h('span', { className: 'ah-side-file-name' }, f.name),
-                    f.failed ? h('span', { className: 'ah-side-file-warn', title: `${f.failed} lần sửa lỗi` }, h(Icon, { name: 'warning', size: 12 })) : null,
+                    f.failed ? h('span', { className: 'ah-side-file-warn', title: `${f.failed} failed edits` }, h(Icon, { name: 'warning', size: 12 })) : null,
                     h('span', { className: 'ah-spacer' }),
                     h(Delta, { a: f.additions, d: f.deletions }),
                     h('time', { className: 'ah-side-time', title: absTime(f.last_at) }, relTime(f.last_at, s.now))
@@ -4880,15 +5030,15 @@ function FilesSection({ s, agent, data }) {
                 )
               ),
               g.files.length > SIDE_FILES_PER_GROUP
-                ? h('li', { key: 'more' }, h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => setMoreDirs({ ...moreDirs, [g.dir]: !more }) }, more ? 'Thu gọn' : `Xem thêm ${g.files.length - SIDE_FILES_PER_GROUP} tệp`))
+                ? h('li', { key: 'more' }, h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => setMoreDirs({ ...moreDirs, [g.dir]: !more }) }, more ? 'Collapse' : `Show ${g.files.length - SIDE_FILES_PER_GROUP} more files`))
                 : null
             )
       )
     }),
     groups.length > SIDE_GROUPS
-      ? h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => setAllGroups(!allGroups) }, allGroups ? 'Thu gọn thư mục' : `Xem thêm ${groups.length - SIDE_GROUPS} thư mục`)
+      ? h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => setAllGroups(!allGroups) }, allGroups ? 'Collapse folders' : `Show ${groups.length - SIDE_GROUPS} more folders`)
       : null,
-    data.files_total > files.length ? h('p', { className: 'ah-side-empty' }, `Chỉ hiển thị ${files.length} trong ${data.files_total} tệp.`) : null
+    data.files_total > files.length ? h('p', { className: 'ah-side-empty' }, `Showing ${files.length} of ${data.files_total} files.`) : null
     ),
     approvedNote
   )
@@ -4907,7 +5057,7 @@ function GoalsSection({ s, agent }) {
   const [busy, setBusy] = useState(false)
 
   if (!d) {
-    return h('p', { className: 'ah-side-empty' }, st && st.status === 'error' ? `Không tải được goal (${st.error}).` : 'Đang tải goal…')
+    return h('p', { className: 'ah-side-empty' }, st && st.status === 'error' ? `Could not load goals (${st.error}).` : 'Loading goals…')
   }
 
   const act = async body => {
@@ -4950,7 +5100,7 @@ function GoalsSection({ s, agent }) {
           className: 'ah-goal-input',
           value: editText,
           autoFocus: true,
-          'aria-label': 'Sửa goal',
+          'aria-label': 'Edit goal',
           onChange: e => setEditText(e.target.value),
           onKeyDown: e => {
             if (e.key === 'Enter') {
@@ -4961,8 +5111,8 @@ function GoalsSection({ s, agent }) {
             }
           }
         }),
-        h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Lưu', 'aria-label': 'Lưu goal', disabled: busy, onClick: () => void saveEdit() }, h(Icon, { name: 'check', size: 14 })),
-        h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Hủy', 'aria-label': 'Hủy sửa', onClick: () => setEditId(null) }, h(Icon, { name: 'close', size: 14 }))
+        h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Save', 'aria-label': 'Save goal', disabled: busy, onClick: () => void saveEdit() }, h(Icon, { name: 'check', size: 14 })),
+        h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Cancel', 'aria-label': 'Cancel edit', onClick: () => setEditId(null) }, h(Icon, { name: 'close', size: 14 }))
       )
     }
 
@@ -4975,35 +5125,35 @@ function GoalsSection({ s, agent }) {
           type: 'button',
           className: 'ah-goal-main ah-state',
           disabled: busy || g.status !== 'active' || current,
-          title: current ? 'Goal hiện tại' : g.status === 'active' ? 'Đặt làm goal hiện tại' : g.title,
+          title: current ? 'Current goals' : g.status === 'active' ? 'Make current goal' : g.title,
           onClick: () => void act({ action: 'current', id: g.id })
         },
         h(Icon, { name: current ? 'target' : GOAL_ICON[g.status] || 'circle-large-outline', size: 14, className: 'ah-goal-ico' }),
         h(
           'span',
           { className: 'ah-goal-body' },
-          current ? h('span', { className: 'ah-goal-tag' }, 'Hiện tại') : null,
+          current ? h('span', { className: 'ah-goal-tag' }, 'Current') : null,
           h('span', { className: 'ah-goal-title' }, g.title),
-          h('span', { className: 'ah-goal-meta' }, `${g.by === 'agent' ? 'Agent đặt' : 'Sếp đặt'} · ${g.status === 'done' ? `xong ${relTime(g.done_at, s.now)}` : relTime(g.updated_at || g.created_at, s.now)}`)
+          h('span', { className: 'ah-goal-meta' }, `${g.by === 'agent' ? 'Set by agent' : 'Set by you'} · ${g.status === 'done' ? `done ${relTime(g.done_at, s.now)}` : relTime(g.updated_at || g.created_at, s.now)}`)
         )
       ),
       h(
         'span',
         { className: 'ah-goal-acts' },
         g.status === 'active'
-          ? h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Đánh dấu xong', 'aria-label': `Xong: ${g.title}`, disabled: busy, onClick: () => void act({ action: 'done', id: g.id }) }, h(Icon, { name: 'check', size: 14 }))
-          : h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Mở lại', 'aria-label': `Mở lại: ${g.title}`, disabled: busy, onClick: () => void act({ action: 'reopen', id: g.id }) }, h(Icon, { name: 'debug-restart', size: 14 })),
-        h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Sửa', 'aria-label': `Sửa: ${g.title}`, onClick: () => { setEditId(g.id); setEditText(g.title) } }, h(Icon, { name: 'edit', size: 14 })),
+          ? h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Mark done', 'aria-label': `Xong: ${g.title}`, disabled: busy, onClick: () => void act({ action: 'done', id: g.id }) }, h(Icon, { name: 'check', size: 14 }))
+          : h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Reopen', 'aria-label': `Reopen: ${g.title}`, disabled: busy, onClick: () => void act({ action: 'reopen', id: g.id }) }, h(Icon, { name: 'debug-restart', size: 14 })),
+        h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Edit', 'aria-label': `Edit: ${g.title}`, onClick: () => { setEditId(g.id); setEditText(g.title) } }, h(Icon, { name: 'edit', size: 14 })),
         h(
           'button',
           {
             type: 'button',
             className: 'ah-icon-btn ah-icon-btn-sm ah-state',
-            title: 'Xóa',
-            'aria-label': `Xóa: ${g.title}`,
+            title: 'Delete',
+            'aria-label': `Delete: ${g.title}`,
             disabled: busy,
             onClick: () => {
-              const okDel = typeof window === 'undefined' || typeof window.confirm !== 'function' || window.confirm(`Xóa goal "${g.title}"?`)
+              const okDel = typeof window === 'undefined' || typeof window.confirm !== 'function' || window.confirm(`Delete goal "${g.title}"?`)
 
               if (okDel) {
                 void act({ action: 'delete', id: g.id })
@@ -5027,13 +5177,13 @@ function GoalsSection({ s, agent }) {
   return h(
     'div',
     { className: 'ah-goals' },
-    active.length === 0 && closed.length === 0 ? h('p', { className: 'ah-side-empty' }, 'Chưa có goal. Nhắn việc cho agent, nó sẽ tự đặt và cập nhật goal; hoặc thêm ở dưới.') : null,
+    active.length === 0 && closed.length === 0 ? h('p', { className: 'ah-side-empty' }, 'No goals yet. Give the agent work and it sets and updates goals itself, or add one below.') : null,
     active.length ? h('ul', { className: 'ah-goal-list' }, active.map(row)) : null,
     closed.length
       ? h(
           'div',
           { className: 'ah-goal-closed' },
-          h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', 'aria-expanded': showClosed ? 'true' : 'false', onClick: () => setShowClosed(!showClosed) }, h(Icon, { name: showClosed ? 'chevron-down' : 'chevron-right', size: 12 }), `${closed.length} goal đã xong hoặc bỏ`),
+          h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', 'aria-expanded': showClosed ? 'true' : 'false', onClick: () => setShowClosed(!showClosed) }, h(Icon, { name: showClosed ? 'chevron-down' : 'chevron-right', size: 12 }), `${closed.length} goals done or dropped`),
           showClosed ? h('ul', { className: 'ah-goal-list' }, closed.map(row)) : null
         )
       : null,
@@ -5044,8 +5194,8 @@ function GoalsSection({ s, agent }) {
       h('input', {
         className: 'ah-goal-input',
         value: adding,
-        placeholder: 'Thêm goal…',
-        'aria-label': 'Thêm goal',
+        placeholder: 'Add a goal…',
+        'aria-label': 'Add goal',
         disabled: busy,
         onChange: e => setAdding(e.target.value),
         onKeyDown: e => {
@@ -5084,15 +5234,15 @@ function CommandsSection({ s, agent }) {
   }, [open && open.id])
 
   if (!st || (!st.data && st.status !== 'error')) {
-    return h('p', { className: 'ah-side-empty' }, 'Đang tải…')
+    return h('p', { className: 'ah-side-empty' }, 'Loading…')
   }
 
   if (!st.data) {
-    return h('p', { className: 'ah-side-empty' }, `Không tải được danh sách lệnh (${st.error}).`)
+    return h('p', { className: 'ah-side-empty' }, `Could not load commands (${st.error}).`)
   }
 
   if (items.length === 0) {
-    return h('p', { className: 'ah-side-empty' }, 'Không có lệnh nào đang chạy.')
+    return h('p', { className: 'ah-side-empty' }, 'No commands running.')
   }
 
   return h(
@@ -5108,7 +5258,7 @@ function CommandsSection({ s, agent }) {
         { key: c.id, className: cx('ah-cmd-item', isOpen && 'is-open') },
         h(
           'button',
-          { type: 'button', className: 'ah-cmd-row ah-state', 'aria-expanded': isOpen ? 'true' : 'false', onClick: () => setOpenId(isOpen ? null : c.id), title: c.visible ? 'Đang chạy hiển thị trong phiên chat: bấm để xem' : 'Đang chạy ẩn (nền): bấm để xem đầu ra' },
+          { type: 'button', className: 'ah-cmd-row ah-state', 'aria-expanded': isOpen ? 'true' : 'false', onClick: () => setOpenId(isOpen ? null : c.id), title: c.visible ? 'Running visibly in the chat session: click to view' : 'Running hidden (background): click to view output' },
           h('span', { className: 'ah-cmd-live', 'aria-hidden': 'true' }),
           h(Icon, { name: c.visible ? 'eye' : 'eye-closed', size: 14, className: 'ah-cmd-vis' }),
           h(Icon, { name: toolIcon(c.tool), size: 14 }),
@@ -5123,16 +5273,16 @@ function CommandsSection({ s, agent }) {
               h(
                 'p',
                 { className: 'ah-cmd-meta' },
-                c.visible ? 'Chạy hiển thị · agent đang chờ kết quả' : 'Chạy ẩn (nền)',
+                c.visible ? 'Visible · the agent is waiting for the result' : 'Hidden (background)',
                 c.pid ? ` · PID ${c.pid}` : '',
                 c.cwd ? ` · ${c.cwd}` : '',
                 c.session_title ? ` · ${c.session_title}` : ''
               ),
               c.kind === 'background'
-                ? h('pre', { className: 'ah-cmd-out ah-mono' }, out ? out.output || (out.error ? `Không đọc được đầu ra (${out.error}).` : '(chưa có đầu ra)') : 'Đang tải đầu ra…')
+                ? h('pre', { className: 'ah-cmd-out ah-mono' }, out ? out.output || (out.error ? `Could not read output (${out.error}).` : '(no output yet)') : 'Loading output…')
                 : liveTool
                   ? h('ol', { className: 'ah-live-tools' }, h(LiveTool, { tool: liveTool }))
-                  : h('p', { className: 'ah-side-empty' }, 'Đầu ra hiện trong phiên chat khi lệnh chạy xong.')
+                  : h('p', { className: 'ah-side-empty' }, 'Output appears in the chat when the command finishes.')
             )
           : null
       )
@@ -5147,7 +5297,7 @@ function PeersSection({ s, agent, data }) {
   const delegating = myTurn ? myTurn.tools.filter(t => t.state === 'run' && /delegate|subagent|send_message|bot_relay/i.test(t.name)) : []
 
   if (peers.length === 0 && delegating.length === 0) {
-    return h('p', { className: 'ah-side-empty' }, 'Agent này chưa trao đổi với agent nào khác.')
+    return h('p', { className: 'ah-side-empty' }, 'This agent has not worked with other agents yet.')
   }
 
   return h(
@@ -5158,7 +5308,7 @@ function PeersSection({ s, agent, data }) {
         'li',
         { key: `run-${t.id}`, className: 'ah-peer is-live' },
         h('span', { className: 'ah-peer-av' }, h(Icon, { name: 'organization', size: 16 })),
-        h('div', { className: 'ah-peer-body' }, h('span', { className: 'ah-peer-name' }, 'Đang giao việc'), h('span', { className: 'ah-peer-doing' }, t.context || t.name)),
+        h('div', { className: 'ah-peer-body' }, h('span', { className: 'ah-peer-name' }, 'Delegating'), h('span', { className: 'ah-peer-doing' }, t.context || t.name)),
         h(Icon, { name: 'loading', size: 14, spinning: true })
       )
     ),
@@ -5174,7 +5324,7 @@ function PeersSection({ s, agent, data }) {
           {
             type: 'button',
             className: 'ah-peer-main ah-state',
-            title: `Chat với ${p.name}: xem ${p.name} đang làm gì`,
+            title: `Chat with ${p.name}: see what ${p.name} is doing`,
             onClick: () => setUi({ agent: p.agent, tab: 'chat', handoff: null, sideFile: null })
           },
           h('span', { className: cx('ah-live-av', active && 'is-on') }, h(Avatar, { id: p.agent, name: p.name, size: 32, status: other ? other.status : active ? 'active' : 'idle', mood: moodOf(s, p.agent) })),
@@ -5185,12 +5335,12 @@ function PeersSection({ s, agent, data }) {
               'span',
               { className: 'ah-peer-name' },
               p.name,
-              h('span', { className: cx('ah-peer-dir', p.direction === 'out' ? 'is-out' : 'is-in') }, p.direction === 'out' ? 'được giao việc' : 'giao việc cho agent này'),
-              p.count > 1 ? h('span', { className: 'ah-peer-count' }, `${p.count} lần`) : null
+              h('span', { className: cx('ah-peer-dir', p.direction === 'out' ? 'is-out' : 'is-in') }, p.direction === 'out' ? 'was given work' : 'gave this agent work'),
+              p.count > 1 ? h('span', { className: 'ah-peer-count' }, `${p.count} times`) : null
             ),
             h('span', { className: 'ah-peer-task', title: p.title }, p.title),
             p.doing
-              ? h('span', { className: cx('ah-peer-doing', active && 'is-active') }, active ? h('span', { className: 'ah-pulse', 'aria-hidden': 'true' }) : null, `${active ? 'Đang làm' : 'Gần nhất'}: ${p.doing}`, p.doing_at ? h('time', { className: 'ah-side-time' }, ` · ${relTime(p.doing_at, s.now)}`) : null)
+              ? h('span', { className: cx('ah-peer-doing', active && 'is-active') }, active ? h('span', { className: 'ah-pulse', 'aria-hidden': 'true' }) : null, `${active ? 'Working' : 'Latest'}: ${p.doing}`, p.doing_at ? h('time', { className: 'ah-side-time' }, ` · ${relTime(p.doing_at, s.now)}`) : null)
               : null
           )
         ),
@@ -5207,7 +5357,7 @@ function ContextSection({ data }) {
   const [copied, setCopied] = useState('')
 
   if (ctx.length === 0) {
-    return h('p', { className: 'ah-side-empty' }, 'Chưa xác định được thư mục làm việc.')
+    return h('p', { className: 'ah-side-empty' }, 'No working folder detected yet.')
   }
 
   const copy = p => {
@@ -5230,8 +5380,8 @@ function ContextSection({ data }) {
         'li',
         { key: c.path, className: cx('ah-ctx', !c.exists && 'is-missing') },
         h('span', { className: 'ah-ctx-icon' }, h(Icon, { name: c.denied ? 'lock' : CTX_ICON[c.kind] || 'folder', size: 14 })),
-        h('div', { className: 'ah-ctx-body' }, h('span', { className: 'ah-ctx-label' }, c.label, !c.exists ? ' (không còn tồn tại)' : ''), h('span', { className: 'ah-ctx-path ah-mono', title: c.path }, c.path)),
-        h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: copied === c.path ? 'Đã chép' : 'Chép đường dẫn', 'aria-label': 'Chép đường dẫn', onClick: () => copy(c.path) }, h(Icon, { name: copied === c.path ? 'check' : 'copy', size: 14 }))
+        h('div', { className: 'ah-ctx-body' }, h('span', { className: 'ah-ctx-label' }, c.label, !c.exists ? ' (no longer exists)' : ''), h('span', { className: 'ah-ctx-path ah-mono', title: c.path }, c.path)),
+        h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: copied === c.path ? 'Copied' : 'Copy path', 'aria-label': 'Copy path', onClick: () => copy(c.path) }, h(Icon, { name: copied === c.path ? 'check' : 'copy', size: 14 }))
       )
     )
   )
@@ -5241,7 +5391,7 @@ function DiffBody({ text, wrap, label, empty }) {
   const lines = useMemo(() => parseDiff(text), [text])
 
   if (lines.length === 0) {
-    return empty || h(EmptyState, { icon: 'diff', title: 'Không có thay đổi để hiển thị' })
+    return empty || h(EmptyState, { icon: 'diff', title: 'No changes to show' })
   }
 
   const shown = lines.slice(0, MAX_DIFF_LINES)
@@ -5273,7 +5423,7 @@ function DiffBody({ text, wrap, label, empty }) {
         )
       })
     ),
-    lines.length > MAX_DIFF_LINES ? h('p', { className: 'ah-diff-note' }, `Chỉ hiển thị ${MAX_DIFF_LINES} dòng đầu trong tổng ${lines.length} dòng.`) : null
+    lines.length > MAX_DIFF_LINES ? h('p', { className: 'ah-diff-note' }, `Showing the first ${MAX_DIFF_LINES} of ${lines.length} lines.`) : null
   )
 }
 
@@ -5289,11 +5439,11 @@ function CodeBody({ text, wrap, label }) {
       { className: 'ah-diff-body' },
       shown.map((ln, i) => h('div', { key: i, className: 'ah-dl is-ctx' }, h('span', { className: 'ah-dl-no', 'aria-hidden': 'true' }, i + 1), h('span', { className: 'ah-dl-code' }, ln === '' ? '\u00a0' : ln)))
     ),
-    lines.length > MAX_DIFF_LINES ? h('p', { className: 'ah-diff-note' }, `Chỉ hiển thị ${MAX_DIFF_LINES} dòng đầu trong tổng ${lines.length} dòng.`) : null
+    lines.length > MAX_DIFF_LINES ? h('p', { className: 'ah-diff-note' }, `Showing the first ${MAX_DIFF_LINES} of ${lines.length} lines.`) : null
   )
 }
 
-const DIFF_SOURCE = { git: 'So với git HEAD', session: 'Các bản vá trong phiên', write: 'Nội dung agent đã ghi', none: '' }
+const DIFF_SOURCE = { git: 'Against git HEAD', session: 'Patches in this session', write: 'Content the agent wrote', none: '' }
 
 function FilePreview({ s, agent, path }) {
   const entry = s.preview[previewKey(agent, path)]
@@ -5308,22 +5458,22 @@ function FilePreview({ s, agent, path }) {
   if (!entry || (entry.status === 'loading' && !d)) {
     body = h(Skeleton, { rows: 10, className: 'ah-inset' })
   } else if (entry.status === 'error' && !d) {
-    body = h(ErrorState, { message: 'Không mở được tệp', detail: entry.error, onRetry: () => void fetchPreview(agent, path), compactMode: true })
+    body = h(ErrorState, { message: 'Could not open the file', detail: entry.error, onRetry: () => void fetchPreview(agent, path), compactMode: true })
   } else if (d.hidden) {
-    body = h(EmptyState, { icon: 'lock', title: 'Tệp bị ẩn vì bảo mật', hint: 'Tệp nằm trong danh sách cấm đọc (khóa, token, thư mục private...).' })
+    body = h(EmptyState, { icon: 'lock', title: 'File hidden for security', hint: 'The file is on the deny list (keys, tokens, private folders…).' })
   } else if (view === 'diff') {
     body = h(DiffBody, {
       text: d.diff,
       wrap,
-      label: `Thay đổi của ${d.name}`,
-      empty: h(EmptyState, { icon: 'diff', title: 'Không có diff dạng văn bản', hint: d.exists ? 'Tệp có thể đã được commit hoặc là tệp nhị phân. Xem tab Nội dung.' : 'Tệp không còn tồn tại.' })
+      label: `Changes to ${d.name}`,
+      empty: h(EmptyState, { icon: 'diff', title: 'No text diff', hint: d.exists ? 'The file may be committed or binary. See the Content tab.' : 'The file no longer exists.' })
     })
   } else if (!d.exists) {
-    body = h(EmptyState, { icon: 'file', title: 'Tệp không còn tồn tại', hint: 'Agent đã xóa hoặc di chuyển tệp này.' })
+    body = h(EmptyState, { icon: 'file', title: 'The file no longer exists', hint: 'The agent deleted or moved this file.' })
   } else if (d.binary) {
-    body = h(EmptyState, { icon: 'file-media', title: 'Tệp nhị phân', hint: 'Không xem trước được tệp nhị phân.' })
+    body = h(EmptyState, { icon: 'file-media', title: 'Binary file', hint: 'Binary files cannot be previewed.' })
   } else {
-    body = h(CodeBody, { text: d.content, wrap, label: `Nội dung ${d.name}` })
+    body = h(CodeBody, { text: d.content, wrap, label: `Content ${d.name}` })
   }
 
   return h(
@@ -5332,10 +5482,10 @@ function FilePreview({ s, agent, path }) {
     h(
       'header',
       { className: 'ah-side-pv-head' },
-      h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Quay lại danh sách', 'aria-label': 'Quay lại danh sách', onClick: () => setUi({ sideFile: null }) }, h(Icon, { name: 'arrow-left', size: 16 })),
+      h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Back to the list', 'aria-label': 'Back to the list', onClick: () => setUi({ sideFile: null }) }, h(Icon, { name: 'arrow-left', size: 16 })),
       f ? h(FileBadge, { status: f.status }) : null,
       h('div', { className: 'ah-side-pv-titles' }, h('span', { className: 'ah-side-pv-name' }, baseOf(path)), h('span', { className: 'ah-side-pv-path ah-mono', title: path }, path)),
-      h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Tải lại', 'aria-label': 'Tải lại', onClick: () => void fetchPreview(agent, path) }, h(Icon, { name: 'sync', size: 14, spinning: !!(entry && entry.status === 'loading') }))
+      h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Reload', 'aria-label': 'Reload', onClick: () => void fetchPreview(agent, path) }, h(Icon, { name: 'sync', size: 14, spinning: !!(entry && entry.status === 'loading') }))
     ),
     h(
       'div',
@@ -5344,24 +5494,24 @@ function FilePreview({ s, agent, path }) {
         'div',
         { className: 'ah-seg', role: 'tablist' },
         [
-          ['diff', 'Thay đổi', 'diff'],
-          ['content', 'Nội dung', 'file-code']
+          ['diff', 'Changes', 'diff'],
+          ['content', 'Content', 'file-code']
         ].map(([id, label, icon]) =>
           h('button', { key: id, type: 'button', role: 'tab', 'aria-selected': view === id ? 'true' : 'false', className: cx('ah-seg-btn ah-state', view === id && 'is-on'), onClick: () => setUi({ sideView: id }) }, h(Icon, { name: icon, size: 14 }), h('span', null, label))
         )
       ),
       h('span', { className: 'ah-spacer' }),
       f ? h(Delta, { a: f.additions, d: f.deletions }) : null,
-      h('button', { type: 'button', className: cx('ah-icon-btn ah-icon-btn-sm ah-state', wrap && 'is-on'), 'aria-pressed': wrap ? 'true' : 'false', title: 'Xuống dòng', 'aria-label': 'Xuống dòng', onClick: () => setUi({ wrap: !wrap }) }, h(Icon, { name: 'word-wrap', size: 14 }))
+      h('button', { type: 'button', className: cx('ah-icon-btn ah-icon-btn-sm ah-state', wrap && 'is-on'), 'aria-pressed': wrap ? 'true' : 'false', title: 'Wrap lines', 'aria-label': 'Wrap lines', onClick: () => setUi({ wrap: !wrap }) }, h(Icon, { name: 'word-wrap', size: 14 }))
     ),
     d && !d.hidden
       ? h(
           'p',
           { className: 'ah-side-pv-meta' },
-          `${d.ops.length} lần sửa trong phiên`,
-          d.ops.length ? ` · gần nhất ${relTime(d.ops[d.ops.length - 1].at, s.now)}` : '',
+          `${d.ops.length} edits this session`,
+          d.ops.length ? ` · latest ${relTime(d.ops[d.ops.length - 1].at, s.now)}` : '',
           view === 'diff' && DIFF_SOURCE[d.diff_source] ? ` · ${DIFF_SOURCE[d.diff_source]}` : '',
-          (view === 'diff' ? d.diff_truncated : d.content_truncated) ? ' · đã cắt bớt vì quá lớn' : ''
+          (view === 'diff' ? d.diff_truncated : d.content_truncated) ? ' · truncated (too large)' : ''
         )
       : null,
     h('div', { className: 'ah-side-pv-body' }, body)
@@ -5373,36 +5523,36 @@ function ChatSide({ s, agent }) {
   const data = entry && entry.data
 
   if (s.ui.sideFile) {
-    return h('aside', { className: 'ah-side', 'aria-label': 'Xem tệp' }, h(FilePreview, { s, agent, path: s.ui.sideFile }))
+    return h('aside', { className: 'ah-side', 'aria-label': 'File viewer' }, h(FilePreview, { s, agent, path: s.ui.sideFile }))
   }
 
   const activeGoals = ((s.goals[agent] && s.goals[agent].data && s.goals[agent].data.goals) || []).filter(g => g.status === 'active').length
   const goalsSec = h(SideSection, { key: 'goals', id: 'goals', title: 'Goal', icon: 'target', count: activeGoals }, h(GoalsSection, { s, agent }))
-  const cmdsSec = h(SideSection, { key: 'cmds', id: 'cmds', title: 'Lệnh đang chạy', icon: 'terminal', count: cmdCount(s, agent) }, h(CommandsSection, { s, agent }))
+  const cmdsSec = h(SideSection, { key: 'cmds', id: 'cmds', title: 'Running commands', icon: 'terminal', count: cmdCount(s, agent) }, h(CommandsSection, { s, agent }))
   let content
 
   if (!entry || (entry.status === 'loading' && !data)) {
     content = h(Skeleton, { rows: 6, className: 'ah-inset' })
   } else if (entry.status === 'error' && !data) {
-    content = h(ErrorState, { message: 'Không tải được phiên làm việc', detail: entry.error, onRetry: () => void fetchWorkspace(agent), compactMode: true })
+    content = h(ErrorState, { message: 'Could not load the session', detail: entry.error, onRetry: () => void fetchWorkspace(agent), compactMode: true })
   } else {
     content = [
-      h(SideSection, { key: 'files', id: 'files', title: 'Tệp đã thay đổi', icon: 'git-compare', count: data.files_total || 0 }, h(FilesSection, { s, agent, data })),
-      h(SideSection, { key: 'peers', id: 'peers', title: 'Đang làm việc cùng', icon: 'organization', count: (data.peers || []).length }, h(PeersSection, { s, agent, data })),
-      h(SideSection, { key: 'ctx', id: 'ctx', title: 'Thư mục được truy cập', icon: 'folder-library', count: (data.context || []).length }, h(ContextSection, { data }))
+      h(SideSection, { key: 'files', id: 'files', title: 'Changed files', icon: 'git-compare', count: data.files_total || 0 }, h(FilesSection, { s, agent, data })),
+      h(SideSection, { key: 'peers', id: 'peers', title: 'Working with', icon: 'organization', count: (data.peers || []).length }, h(PeersSection, { s, agent, data })),
+      h(SideSection, { key: 'ctx', id: 'ctx', title: 'Folders accessed', icon: 'folder-library', count: (data.context || []).length }, h(ContextSection, { data }))
     ]
   }
 
   return h(
     'aside',
-    { className: 'ah-side', 'aria-label': 'Phiên làm việc' },
+    { className: 'ah-side', 'aria-label': 'Session' },
     h(
       'header',
       { className: 'ah-side-head' },
-      h('h2', { className: 'ah-side-title' }, 'Phiên làm việc'),
+      h('h2', { className: 'ah-side-title' }, 'Session'),
       h('span', { className: 'ah-spacer' }),
-      h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Tải lại', 'aria-label': 'Tải lại', onClick: () => void fetchWorkspace(agent) }, h(Icon, { name: 'sync', size: 14, spinning: !!(entry && entry.status === 'loading') })),
-      h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Ẩn bảng', 'aria-label': 'Ẩn bảng', onClick: () => setUi({ side: false }) }, h(Icon, { name: 'close', size: 14 }))
+      h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Reload', 'aria-label': 'Reload', onClick: () => void fetchWorkspace(agent) }, h(Icon, { name: 'sync', size: 14, spinning: !!(entry && entry.status === 'loading') })),
+      h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Hide panel', 'aria-label': 'Hide panel', onClick: () => setUi({ side: false }) }, h(Icon, { name: 'close', size: 14 }))
     ),
     h('div', { className: 'ah-side-body' }, goalsSec, cmdsSec, content)
   )
@@ -5411,13 +5561,13 @@ function ChatSide({ s, agent }) {
 /* ───────────────────────── works ───────────────────────── */
 
 const SCHEDULE_PRESETS = [
-  { value: 'daily', label: 'Hằng ngày lúc 9:00', expr: '0 9 * * *' },
-  { value: 'weekdays', label: 'Ngày làm việc lúc 9:00', expr: '0 9 * * 1-5' },
-  { value: 'weekly', label: 'Thứ Hai hằng tuần lúc 9:00', expr: '0 9 * * 1' },
-  { value: 'monthly', label: 'Ngày 1 hằng tháng lúc 9:00', expr: '0 9 1 * *' },
-  { value: 'hourly', label: 'Mỗi giờ', expr: '0 * * * *' },
-  { value: 'every-15-minutes', label: 'Mỗi 15 phút', expr: '*/15 * * * *' },
-  { value: 'custom', label: 'Tùy chỉnh' }
+  { value: 'daily', label: 'Daily at 9:00', expr: '0 9 * * *' },
+  { value: 'weekdays', label: 'Weekdays at 9:00', expr: '0 9 * * 1-5' },
+  { value: 'weekly', label: 'Mondays at 9:00', expr: '0 9 * * 1' },
+  { value: 'monthly', label: '1st of each month at 9:00', expr: '0 9 1 * *' },
+  { value: 'hourly', label: 'Hourly', expr: '0 * * * *' },
+  { value: 'every-15-minutes', label: 'Every 15 minutes', expr: '*/15 * * * *' },
+  { value: 'custom', label: 'Custom' }
 ]
 
 function ScheduleForm({ s, onClose }) {
@@ -5429,7 +5579,7 @@ function ScheduleForm({ s, onClose }) {
   const [custom, setCustom] = useState('')
   const [deliver, setDeliver] = useState('local')
   const [repeat, setRepeat] = useState('')
-  const [targets, setTargets] = useState([{ id: 'local', name: 'Local (chỉ lưu)' }])
+  const [targets, setTargets] = useState([{ id: 'local', name: 'Local (save only)' }])
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState(null)
   const schedule = preset === 'custom' ? custom.trim() : (SCHEDULE_PRESETS.find(p => p.value === preset) || {}).expr || ''
@@ -5454,7 +5604,7 @@ function ScheduleForm({ s, onClose }) {
     }
 
     if (!prompt.trim() || !schedule) {
-      setErr(!prompt.trim() ? 'Cần nhập yêu cầu cho agent.' : 'Cần nhập lịch chạy.')
+      setErr(!prompt.trim() ? 'Enter what the agent should do.' : 'Enter a schedule.')
 
       return
     }
@@ -5477,36 +5627,36 @@ function ScheduleForm({ s, onClose }) {
 
   return h(
     'form',
-    { className: 'ah-sched-form', onSubmit: submit, 'aria-label': 'Tạo schedule mới' },
-    h('div', { className: 'ah-sched-head' }, h(Icon, { name: 'history', size: 16 }), h('h3', null, 'Schedule mới'), h('span', { className: 'ah-spacer' }), h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', 'aria-label': 'Đóng', onClick: () => onClose(null) }, h(Icon, { name: 'close', size: 14 }))),
+    { className: 'ah-sched-form', onSubmit: submit, 'aria-label': 'New scheduled job' },
+    h('div', { className: 'ah-sched-head' }, h(Icon, { name: 'history', size: 16 }), h('h3', null, 'New scheduled job'), h('span', { className: 'ah-spacer' }), h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', 'aria-label': 'Close', onClick: () => onClose(null) }, h(Icon, { name: 'close', size: 14 }))),
     h(
       'div',
       { className: 'ah-sched-grid' },
       field('Agent', h('select', { className: 'ah-input', value: agent, onChange: e => setAgent(e.target.value) }, agents.map(a => h('option', { key: a.id, value: a.id }, a.name || a.id)))),
-      field('Tên (không bắt buộc)', h('input', { className: 'ah-input', value: name, placeholder: 'Ví dụ: Báo cáo sáng', onChange: e => setName(e.target.value) }))
+      field('Name (optional)', h('input', { className: 'ah-input', value: name, placeholder: 'e.g. Morning report', onChange: e => setName(e.target.value) }))
     ),
-    field('Yêu cầu cho agent', h('textarea', { className: 'ah-input ah-sched-prompt', rows: 4, value: prompt, placeholder: 'Agent sẽ làm gì mỗi lần chạy?', onChange: e => setPrompt(e.target.value) })),
+    field('Prompt for the agent', h('textarea', { className: 'ah-input ah-sched-prompt', rows: 4, value: prompt, placeholder: 'What should the agent do on each run?', onChange: e => setPrompt(e.target.value) })),
     h(
       'div',
       { className: 'ah-sched-grid' },
-      field('Tần suất', h('select', { className: 'ah-input', value: preset, onChange: e => setPreset(e.target.value) }, SCHEDULE_PRESETS.map(p => h('option', { key: p.value, value: p.value }, p.label)))),
-      field('Gửi kết quả tới', h('select', { className: 'ah-input', value: deliver, onChange: e => setDeliver(e.target.value) }, targets.map(t => h('option', { key: t.id, value: t.id, disabled: t.home_target_set === false }, `${t.name || t.id}${t.home_target_set === false ? ' (chưa đặt kênh)' : ''}`))))
+      field('Frequency', h('select', { className: 'ah-input', value: preset, onChange: e => setPreset(e.target.value) }, SCHEDULE_PRESETS.map(p => h('option', { key: p.value, value: p.value }, p.label)))),
+      field('Deliver to', h('select', { className: 'ah-input', value: deliver, onChange: e => setDeliver(e.target.value) }, targets.map(t => h('option', { key: t.id, value: t.id, disabled: t.home_target_set === false }, `${t.name || t.id}${t.home_target_set === false ? ' (not configured)' : ''}`))))
     ),
     h(
       'div',
       { className: 'ah-sched-grid' },
       preset === 'custom'
-        ? field('Lịch tùy chỉnh', h('input', { className: 'ah-input ah-mono', value: custom, placeholder: '0 9 * * * hoặc every 2h hoặc 30m', onChange: e => setCustom(e.target.value) }), 'Cron 5 trường, "every 2h", "30m" hoặc thời điểm ISO.')
-        : h('div', { className: 'ah-field' }, h('span', { className: 'ah-field-label' }, 'Biểu thức cron'), h('span', { className: 'ah-sched-expr ah-mono' }, schedule)),
-      field('Số lần chạy', h('input', { className: 'ah-input', type: 'number', min: 1, value: repeat, placeholder: 'Để trống = chạy mãi', onChange: e => setRepeat(e.target.value) }))
+        ? field('Custom schedule', h('input', { className: 'ah-input ah-mono', value: custom, placeholder: '0 9 * * * or every 2h or 30m', onChange: e => setCustom(e.target.value) }), '5-field cron, "every 2h", "30m" or an ISO timestamp.')
+        : h('div', { className: 'ah-field' }, h('span', { className: 'ah-field-label' }, 'Cron expression'), h('span', { className: 'ah-sched-expr ah-mono' }, schedule)),
+      field('Repeat', h('input', { className: 'ah-input', type: 'number', min: 1, value: repeat, placeholder: 'Empty = forever', onChange: e => setRepeat(e.target.value) }))
     ),
     err ? h('p', { className: 'ah-live-error', role: 'alert' }, err) : null,
     h(
       'div',
       { className: 'ah-edit-actions' },
       h('span', { className: 'ah-spacer' }),
-      h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', disabled: busy, onClick: () => onClose(null) }, 'Hủy'),
-      h('button', { type: 'submit', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: busy }, busy ? h(Icon, { name: 'loading', size: 14, spinning: true }) : h(Icon, { name: 'add', size: 14 }), 'Tạo schedule')
+      h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', disabled: busy, onClick: () => onClose(null) }, 'Cancel'),
+      h('button', { type: 'submit', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: busy }, busy ? h(Icon, { name: 'loading', size: 14, spinning: true }) : h(Icon, { name: 'add', size: 14 }), 'New scheduled job')
     )
   )
 }
@@ -5517,9 +5667,9 @@ function Works({ s, v }) {
   const toolbar = h(
     'div',
     { className: 'ah-works-bar' },
-    made ? h('span', { className: 'ah-row-sub', role: 'status' }, h(Icon, { name: 'pass', size: 12 }), ` Đã tạo schedule "${made}".`) : null,
+    made ? h('span', { className: 'ah-row-sub', role: 'status' }, h(Icon, { name: 'pass', size: 12 }), ` Created scheduled job "${made}".`) : null,
     h('span', { className: 'ah-spacer' }),
-    form ? null : h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: !C, onClick: () => { setForm(true); setMade(null) } }, h(Icon, { name: 'add', size: 14 }), 'Tạo schedule')
+    form ? null : h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: !C, onClick: () => { setForm(true); setMade(null) } }, h(Icon, { name: 'add', size: 14 }), 'New scheduled job')
   )
   const top = [
     h('div', { key: 'bar' }, toolbar),
@@ -5541,7 +5691,7 @@ function Works({ s, v }) {
   const items = v.works
 
   if (s.works.status === 'error' && items.length === 0) {
-    return h(ErrorState, { message: 'Không tải được danh sách schedules', detail: s.works.error, onRetry: () => void load() })
+    return h(ErrorState, { message: 'Could not load scheduled jobs', detail: s.works.error, onRetry: () => void load() })
   }
 
   if (s.works.status !== 'ready' && !s.works.data) {
@@ -5555,8 +5705,8 @@ function Works({ s, v }) {
       top,
       h(EmptyState, {
         icon: 'history',
-        title: s.ui.agent || s.ui.q ? 'Không có schedule khớp bộ lọc' : 'Chưa có schedule nào',
-        hint: s.ui.agent || s.ui.q ? 'Bỏ lọc agent hoặc đổi từ khóa tìm kiếm.' : 'Lịch định kỳ, lượt chạy và ủy quyền đang chạy sẽ hiện ở đây.'
+        title: s.ui.agent || s.ui.q ? 'No scheduled job matches the filter' : 'No scheduled jobs yet',
+        hint: s.ui.agent || s.ui.q ? 'Clear the agent filter or change the search.' : 'Recurring jobs, runs and active delegations show up here.'
       })
     )
   }
@@ -5571,8 +5721,8 @@ function Works({ s, v }) {
       h(
         'table',
         { className: 'ah-table' },
-        h('caption', { className: 'ah-sr' }, 'Schedules của các agent'),
-        h('thead', null, h('tr', null, ['Schedule', 'Agent', 'Lịch chạy', 'Lần chạy cuối', 'Lần chạy tới', 'Trạng thái'].map(t => h('th', { key: t, scope: 'col' }, t)))),
+        h('caption', { className: 'ah-sr' }, 'Scheduled jobs of every agent'),
+        h('thead', null, h('tr', null, ['Job', 'Agent', 'Schedule', 'Last run', 'Next run', 'Status'].map(t => h('th', { key: t, scope: 'col' }, t)))),
         h(
           'tbody',
           null,
@@ -5591,9 +5741,9 @@ function Works({ s, v }) {
                 )
               ),
               h('td', null, h('span', { className: 'ah-inline-agent' }, h(Avatar, { id: w.agent, name: agentName(s, w.agent), size: 24 }), h('span', null, agentName(s, w.agent)))),
-              h('td', null, w.schedule ? h('span', { className: 'ah-mono' }, w.schedule) : 'Không có'),
+              h('td', null, w.schedule ? h('span', { className: 'ah-mono' }, w.schedule) : 'None'),
               h('td', null, h('time', { title: absTime(w.last_run_at) }, relTime(w.last_run_at, s.now))),
-              h('td', null, w.next_run_at ? h('time', { title: absTime(w.next_run_at) }, relTime(w.next_run_at, s.now)) : 'Không có'),
+              h('td', null, w.next_run_at ? h('time', { title: absTime(w.next_run_at) }, relTime(w.next_run_at, s.now)) : 'None'),
               h('td', null, h(StatusChip, { status: w.status }))
             )
           )
@@ -5609,7 +5759,7 @@ function Tasks({ s, v }) {
   const items = v.tasks
 
   if (s.tasks.status === 'error' && items.length === 0 && !s.tasks.data) {
-    return h(ErrorState, { message: 'Không tải được danh sách task', detail: s.tasks.error, onRetry: () => void load() })
+    return h(ErrorState, { message: 'Could not load tasks', detail: s.tasks.error, onRetry: () => void load() })
   }
 
   if (s.tasks.status !== 'ready' && !s.tasks.data) {
@@ -5618,7 +5768,7 @@ function Tasks({ s, v }) {
 
   const known = new Set(TASK_COLUMNS.map(c => c.id))
   const other = items.filter(t => !known.has(t.status))
-  const columns = [...TASK_COLUMNS, ...(other.length ? [{ id: '__other', label: 'Khác' }] : [])]
+  const columns = [...TASK_COLUMNS, ...(other.length ? [{ id: '__other', label: 'Other' }] : [])]
 
   if (items.length === 0) {
     return h(
@@ -5626,15 +5776,15 @@ function Tasks({ s, v }) {
       { className: 'ah-pad' },
       h(EmptyState, {
         icon: 'checklist',
-        title: s.ui.agent || s.ui.q ? 'Không có task khớp bộ lọc' : 'Chưa có task nào',
-        hint: s.ui.agent || s.ui.q ? 'Bỏ lọc agent hoặc đổi từ khóa tìm kiếm.' : 'Tạo task trên bảng Kanban, task mới sẽ hiện ở đây trong vòng 15 giây.'
+        title: s.ui.agent || s.ui.q ? 'No task matches the filter' : 'No tasks yet',
+        hint: s.ui.agent || s.ui.q ? 'Clear the agent filter or change the search.' : 'Create tasks on the Kanban board; new ones show up here within 15 seconds.'
       })
     )
   }
 
   return h(
     'div',
-    { className: 'ah-board', role: 'list', 'aria-label': 'Bảng task theo trạng thái' },
+    { className: 'ah-board', role: 'list', 'aria-label': 'Task board by status' },
     columns.map(col => {
       const cards = col.id === '__other' ? other : items.filter(t => t.status === col.id)
 
@@ -5646,7 +5796,7 @@ function Tasks({ s, v }) {
           'div',
           { className: 'ah-col-body' },
           cards.length === 0
-            ? h('p', { className: 'ah-col-empty' }, 'Chưa có task')
+            ? h('p', { className: 'ah-col-empty' }, 'No tasks')
             : cards.map(t =>
                 h(
                   'article',
@@ -5655,14 +5805,14 @@ function Tasks({ s, v }) {
                   h(
                     'div',
                     { className: 'ah-task-chips' },
-                    t.priority !== null && t.priority !== undefined && t.priority !== '' ? h(Chip, { tone: 'flat', icon: 'flag' }, `Ưu tiên ${t.priority}`) : null,
+                    t.priority !== null && t.priority !== undefined && t.priority !== '' ? h(Chip, { tone: 'flat', icon: 'flag' }, `Priority ${t.priority}`) : null,
                     t.branch_name ? h(Chip, { tone: 'flat', icon: 'git-branch', title: t.workspace_path || undefined }, t.branch_name) : null,
-                    num(t.comments) > 0 ? h(Chip, { tone: 'flat', icon: 'comment' }, `${t.comments} bình luận`) : null
+                    num(t.comments) > 0 ? h(Chip, { tone: 'flat', icon: 'comment' }, `${t.comments} comments`) : null
                   ),
                   h(
                     'footer',
                     { className: 'ah-task-foot' },
-                    t.assignee ? h('span', { className: 'ah-inline-agent' }, h(Avatar, { id: t.assignee, name: agentName(s, t.assignee), size: 24 }), h('span', null, agentName(s, t.assignee))) : h('span', { className: 'ah-row-sub' }, 'Chưa giao'),
+                    t.assignee ? h('span', { className: 'ah-inline-agent' }, h(Avatar, { id: t.assignee, name: agentName(s, t.assignee), size: 24 }), h('span', null, agentName(s, t.assignee))) : h('span', { className: 'ah-row-sub' }, 'Unassigned'),
                     h('time', { className: 'ah-row-sub', title: absTime(t.created_at) }, relTime(t.completed_at || t.started_at || t.created_at, s.now))
                   )
                 )
@@ -5677,10 +5827,10 @@ function Tasks({ s, v }) {
 
 function FileBadge({ status }) {
   if (status === 'hidden') {
-    return h('span', { className: 'ah-file-badge is-hidden', title: 'Ẩn vì bảo mật' }, h(Icon, { name: 'lock', size: 14 }), h('span', { className: 'ah-sr' }, 'Ẩn vì bảo mật'))
+    return h('span', { className: 'ah-file-badge is-hidden', title: 'Hidden for security' }, h(Icon, { name: 'lock', size: 14 }), h('span', { className: 'ah-sr' }, 'Hidden for security'))
   }
 
-  const st = FILE_STATUS[status] || { label: status || 'Không rõ', tone: 'neutral' }
+  const st = FILE_STATUS[status] || { label: status || 'Unknown', tone: 'neutral' }
 
   return h('span', { className: cx('ah-file-badge', `is-${st.tone}`), title: st.label }, h('span', { 'aria-hidden': 'true' }, status || '?'), h('span', { className: 'ah-sr' }, st.label))
 }
@@ -5750,7 +5900,7 @@ function DiffViewer({ s, repo, file }) {
       'button',
       { type: 'button', className: cx('ah-btn ah-btn-outlined ah-state', wrap && 'is-on'), 'aria-pressed': wrap ? 'true' : 'false', onClick: () => setUi({ wrap: !wrap }) },
       h(Icon, { name: 'word-wrap', size: 16 }),
-      h('span', null, 'Xuống dòng')
+      h('span', null, 'Wrap lines')
     )
   )
 
@@ -5759,15 +5909,15 @@ function DiffViewer({ s, repo, file }) {
   if (!entry || (entry.status === 'loading' && !entry.data)) {
     body = h(Skeleton, { rows: 9, className: 'ah-inset' })
   } else if (entry.status === 'error' && !entry.data) {
-    body = h(ErrorState, { message: 'Không tải được diff', detail: entry.error, onRetry: () => void fetchDiff(repo.id, file.path), compactMode: true })
+    body = h(ErrorState, { message: 'Could not load the diff', detail: entry.error, onRetry: () => void fetchDiff(repo.id, file.path), compactMode: true })
   } else if (lines.length === 0) {
-    body = h(EmptyState, { icon: 'diff', title: 'Tệp này không có thay đổi để hiển thị', hint: 'Tệp nhị phân hoặc chỉ đổi quyền truy cập sẽ không có diff dạng văn bản.' })
+    body = h(EmptyState, { icon: 'diff', title: 'This file has no changes to show', hint: 'Binary files and permission-only changes have no text diff.' })
   } else {
     const shown = lines.slice(0, MAX_DIFF_LINES)
 
     body = h(
       'div',
-      { className: cx('ah-diff', wrap && 'is-wrap'), role: 'region', 'aria-label': `Diff của ${file.path}`, tabIndex: 0 },
+      { className: cx('ah-diff', wrap && 'is-wrap'), role: 'region', 'aria-label': `Diff of ${file.path}`, tabIndex: 0 },
       h(
         'div',
         { className: 'ah-diff-body' },
@@ -5792,8 +5942,8 @@ function DiffViewer({ s, repo, file }) {
           )
         })
       ),
-      lines.length > MAX_DIFF_LINES ? h('p', { className: 'ah-diff-note' }, `Chỉ hiển thị ${MAX_DIFF_LINES} dòng đầu trong tổng ${lines.length} dòng.`) : null,
-      entry.data && entry.data.truncated ? h('p', { className: 'ah-diff-note' }, 'Diff quá lớn nên đã bị cắt bớt ở phía backend.') : null
+      lines.length > MAX_DIFF_LINES ? h('p', { className: 'ah-diff-note' }, `Showing the first ${MAX_DIFF_LINES} of ${lines.length} lines.`) : null,
+      entry.data && entry.data.truncated ? h('p', { className: 'ah-diff-note' }, 'The diff was too large and was truncated by the backend.') : null
     )
   }
 
@@ -5822,7 +5972,7 @@ function Changes({ s, v }) {
   const repos = v.repos
 
   if (s.changes.status === 'error' && repos.length === 0) {
-    return h(ErrorState, { message: 'Không tải được thay đổi', detail: s.changes.error, onRetry: () => void load() })
+    return h(ErrorState, { message: 'Could not load changes', detail: s.changes.error, onRetry: () => void load() })
   }
 
   if (s.changes.status !== 'ready' && !s.changes.data) {
@@ -5833,7 +5983,7 @@ function Changes({ s, v }) {
     return h(
       'div',
       { className: 'ah-inset' },
-      h(EmptyState, { icon: 'repo', title: 'Chưa có kho mã nguồn nào được theo dõi', hint: 'Thêm đường dẫn vào agents-hub.json trong thư mục Hermes hoặc mở một project để kho hiện ra ở đây.' })
+      h(EmptyState, { icon: 'repo', title: 'No repositories tracked yet', hint: 'Add paths to agents-hub.json in the Hermes folder, or open a project, to list repositories here.' })
     )
   }
 
@@ -5861,7 +6011,7 @@ function ChangesView({ s, repos }) {
       h(
         'div',
         { className: 'ah-repo-head' },
-        h('label', { className: 'ah-field-label', htmlFor: 'ah-repo-select' }, 'Kho mã nguồn'),
+        h('label', { className: 'ah-field-label', htmlFor: 'ah-repo-select' }, 'Repositories'),
         h(
           'select',
           { id: 'ah-repo-select', className: 'ah-select', value: repo.id, onChange: e => setUi({ repo: e.target.value, file: null }) },
@@ -5871,14 +6021,14 @@ function ChangesView({ s, repos }) {
           'div',
           { className: 'ah-repo-meta' },
           repo.branch ? h(Chip, { tone: 'flat', icon: 'git-branch' }, repo.branch) : null,
-          num(repo.ahead) > 0 ? h(Chip, { tone: 'flat', icon: 'arrow-up', title: 'Commit chưa đẩy' }, String(repo.ahead)) : null,
-          num(repo.behind) > 0 ? h(Chip, { tone: 'flat', icon: 'arrow-down', title: 'Commit chưa kéo về' }, String(repo.behind)) : null,
-          h(Chip, { tone: repo.clean ? 'ok' : 'warn', icon: repo.clean ? 'check' : 'circle-filled' }, repo.clean ? 'Sạch' : `${(repo.files || []).length} tệp thay đổi`)
+          num(repo.ahead) > 0 ? h(Chip, { tone: 'flat', icon: 'arrow-up', title: 'Unpushed commits' }, String(repo.ahead)) : null,
+          num(repo.behind) > 0 ? h(Chip, { tone: 'flat', icon: 'arrow-down', title: 'Commits to pull' }, String(repo.behind)) : null,
+          h(Chip, { tone: repo.clean ? 'ok' : 'warn', icon: repo.clean ? 'check' : 'circle-filled' }, repo.clean ? 'Clean' : `${(repo.files || []).length} changed files`)
         ),
-        s.ui.agent ? h('p', { className: 'ah-repo-note' }, 'Thay đổi theo kho, không lọc theo agent.') : null
+        s.ui.agent ? h('p', { className: 'ah-repo-note' }, 'Changes by repository, not filtered by agent.') : null
       ),
       groups.length === 0
-        ? h(EmptyState, { icon: 'check', title: s.ui.q ? 'Không có tệp khớp từ khóa' : 'Kho này không có thay đổi', hint: s.ui.q ? 'Đổi hoặc xóa từ khóa tìm kiếm.' : 'Mọi tệp đều khớp với commit mới nhất.' })
+        ? h(EmptyState, { icon: 'check', title: s.ui.q ? 'No file matches' : 'This repository has no changes', hint: s.ui.q ? 'Change or clear the search.' : 'Every file matches the latest commit.' })
         : h(
             'div',
             { className: 'ah-files', onKeyDown: navKeys },
@@ -5886,7 +6036,7 @@ function ChangesView({ s, repos }) {
               h(
                 'div',
                 { key: g.dir || '.', className: 'ah-file-group' },
-                h('div', { className: 'ah-file-dir ah-mono' }, g.dir ? `${g.dir}/` : '(thư mục gốc)'),
+                h('div', { className: 'ah-file-dir ah-mono' }, g.dir ? `${g.dir}/` : '(root)'),
                 g.items.map(f => {
                   if (f.status === 'hidden') {
                     return h(
@@ -5894,7 +6044,7 @@ function ChangesView({ s, repos }) {
                       { key: f.path, className: 'ah-file is-locked' },
                       h(FileBadge, { status: 'hidden' }),
                       h('span', { className: 'ah-file-name ah-mono' }, baseOf(f.path)),
-                      h('span', { className: 'ah-file-lock' }, 'Ẩn vì bảo mật')
+                      h('span', { className: 'ah-file-lock' }, 'Hidden for security')
                     )
                   }
 
@@ -5919,7 +6069,7 @@ function ChangesView({ s, repos }) {
             )
           )
     ),
-    h('section', { className: 'ah-detail', 'aria-label': 'Diff' }, file ? h(DiffViewer, { s, repo, file }) : h(EmptyState, { icon: 'diff', title: 'Chọn một tệp để xem thay đổi', hint: 'Diff được so với commit mới nhất. Tệp ẩn vì bảo mật không hiển thị nội dung.' }))
+    h('section', { className: 'ah-detail', 'aria-label': 'Diff' }, file ? h(DiffViewer, { s, repo, file }) : h(EmptyState, { icon: 'diff', title: 'Pick a file to see its changes', hint: 'Diffs are against the latest commit. Files hidden for security show no content.' }))
   )
 }
 
@@ -5998,7 +6148,7 @@ function HubPage() {
   )
 }
 
-/* ───────────────────────── accounts, usage, team (tab Cấu hình) ───────────────────────── */
+/* ───────────────────────── accounts, usage, team (Settings tab) ───────────────────────── */
 
 // Usage is cached by the gateway for 10 minutes; the bar asks every 5 and never blanks: the last
 // good numbers stay on screen while a refresh runs or if one fails.
@@ -6020,9 +6170,9 @@ function fmtClock(sec) {
 
   const d = new Date(sec * 1000)
   const same = new Date().toDateString() === d.toDateString()
-  const hm = d.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
+  const hm = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 
-  return same ? hm : `${hm} ${d.toLocaleDateString('vi-VN', { weekday: 'short', day: '2-digit', month: '2-digit' })}`
+  return same ? hm : `${hm} ${d.toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: '2-digit' })}`
 }
 
 function untilText(sec, now) {
@@ -6033,17 +6183,17 @@ function untilText(sec, now) {
   const left = sec - (now || Date.now()) / 1000
 
   if (left <= 0) {
-    return 'đã tới hạn'
+    return 'due now'
   }
 
   const d = Math.floor(left / 86400)
   const hh = Math.floor((left % 86400) / 3600)
   const mm = Math.max(1, Math.floor((left % 3600) / 60))
 
-  return d ? `${d} ngày ${hh} giờ` : hh ? `${hh} giờ ${mm} phút` : `${mm} phút`
+  return d ? `${d} days ${hh} hr` : hh ? `${hh} hr ${mm} min` : `${mm} min`
 }
 
-const WINDOW_SHORT = { session: '5h', 'current session': '5h', weekly: 'tuần', 'current week': 'tuần', week: 'tuần' }
+const WINDOW_SHORT = { session: '5h', 'current session': '5h', weekly: 'wk', 'current week': 'wk', week: 'wk' }
 
 function windowShort(label) {
   const k = String(label || '').toLowerCase()
@@ -6053,7 +6203,7 @@ function windowShort(label) {
   }
 
   if (/week/.test(k)) {
-    return /opus/.test(k) ? 'tuần·Opus' : /sonnet/.test(k) ? 'tuần·Sonnet' : 'tuần'
+    return /opus/.test(k) ? 'wk·Opus' : /sonnet/.test(k) ? 'wk·Sonnet' : 'wk'
   }
 
   return /session|5h|hour/.test(k) ? '5h' : String(label || '')
@@ -6063,11 +6213,11 @@ function windowLong(label) {
   const k = String(label || '').toLowerCase()
 
   if (/session|5h/.test(k)) {
-    return 'Phiên 5 giờ'
+    return '5-hour session'
   }
 
   if (/week/.test(k)) {
-    return /opus/.test(k) ? 'Tuần (Opus)' : /sonnet/.test(k) ? 'Tuần (Sonnet)' : 'Tuần'
+    return /opus/.test(k) ? 'Weekly (Opus)' : /sonnet/.test(k) ? 'Weekly (Sonnet)' : 'Weekly'
   }
 
   return String(label || '')
@@ -6129,18 +6279,18 @@ function UsageBar({ s, agent }) {
   }, [agent])
 
   if (!u) {
-    return h('div', { className: 'ah-usage', 'aria-busy': 'true' }, h('span', { className: 'ah-usage-muted' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Đang lấy usage…'))
+    return h('div', { className: 'ah-usage', 'aria-busy': 'true' }, h('span', { className: 'ah-usage-muted' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Fetching usage…'))
   }
 
   if (!rows.length) {
     return u.status === 'error'
-      ? h('div', { className: 'ah-usage' }, h('span', { className: 'ah-usage-muted', title: u.error || '' }, 'Chưa lấy được usage — sẽ thử lại.'))
+      ? h('div', { className: 'ah-usage' }, h('span', { className: 'ah-usage-muted', title: u.error || '' }, 'Usage unavailable, retrying.'))
       : null
   }
 
   return h(
     'div',
-    { className: 'ah-usage', role: 'group', 'aria-label': 'Usage tài khoản model' },
+    { className: 'ah-usage', role: 'group', 'aria-label': 'Model account usage' },
     rows.map(p => h(UsageChip, { key: p.id, p, now })),
     u.status === 'error' ? h('span', { className: 'ah-usage-muted', title: u.error || '' }, h(Icon, { name: 'warning', size: 12 })) : null
   )
@@ -6156,7 +6306,7 @@ function UsageChip({ p, now }) {
       return h('span', { className: 'ah-usage-chip is-muted' }, h('b', null, p.label), h(Icon, { name: 'loading', size: 12, spinning: true }))
     }
 
-    return h('button', { type: 'button', className: 'ah-usage-chip is-muted ah-state', onClick: openConfig, title: 'Chưa đăng nhập — mở tab Cấu hình' }, h('b', null, p.label), 'chưa đăng nhập')
+    return h('button', { type: 'button', className: 'ah-usage-chip is-muted ah-state', onClick: openConfig, title: 'Not logged in: open Settings' }, h('b', null, p.label), 'not logged in')
   }
 
   const main = wins.slice(0, 2)
@@ -6177,7 +6327,7 @@ function UsageChip({ p, now }) {
             h('small', null, windowShort(w.label))
           )
         )
-      : h('small', null, p.loading ? '…' : (p.usage && p.usage.unavailable) || 'không có số liệu'),
+      : h('small', null, p.loading ? '…' : (p.usage && p.usage.unavailable) || 'no data'),
     stale || p.error ? h(Icon, { name: 'warning', size: 12, className: 'ah-usage-stale' }) : null,
     h(UsagePop, { p, now })
   )
@@ -6196,19 +6346,19 @@ function UsagePop({ p, now }) {
       h(
         'div',
         { key: i, className: 'ah-usage-wrow' },
-        h('div', { className: 'ah-usage-line' }, h('span', null, windowLong(w.label)), h('b', null, `${Math.round(w.used_percent)}% đã dùng`)),
+        h('div', { className: 'ah-usage-line' }, h('span', null, windowLong(w.label)), h('b', null, `${Math.round(w.used_percent)}% used`)),
         h('span', { className: 'ah-usage-meter is-wide' }, h('span', { className: `is-${usageTone(w.used_percent)}`, style: { width: `${Math.min(100, Math.max(2, w.used_percent))}%` } })),
-        w.reset_at ? h('small', null, `Reset ${fmtClock(w.reset_at)} (còn ${untilText(w.reset_at, now)})`) : null,
+        w.reset_at ? h('small', null, `Reset ${fmtClock(w.reset_at)} (in ${untilText(w.reset_at, now)})`) : null,
         w.detail ? h('small', null, w.detail) : null
       )
     ),
     (us.details || []).map((d, i) => h('small', { key: `d${i}` }, d)),
     h('hr'),
-    line('Đăng nhập', st.via === 'claude-code' ? 'Claude Code' : st.source_label || st.source || '—'),
-    st.expires_at_s ? line('Token hết hạn', `${fmtClock(st.expires_at_s)} (${untilText(st.expires_at_s, now)})`) : null,
-    line('Tự làm mới token', st.has_refresh_token ? 'Có' : st.source && /pool|chatgpt|codex/.test(String(st.source)) ? 'Hermes tự quản' : 'Không'),
-    st.last_refresh_s ? line('Làm mới lần cuối', relTime(st.last_refresh_s, now)) : null,
-    line('Cập nhật usage', p.updated_at ? relTime(p.updated_at, now) : '—'),
+    line('Log in', st.via === 'claude-code' ? 'Claude Code' : st.source_label || st.source || '—'),
+    st.expires_at_s ? line('Token expires', `${fmtClock(st.expires_at_s)} (${untilText(st.expires_at_s, now)})`) : null,
+    line('Token auto-refresh', st.has_refresh_token ? 'Yes' : st.source && /pool|chatgpt|codex/.test(String(st.source)) ? 'Managed by Hermes' : 'No'),
+    st.last_refresh_s ? line('Last refreshed', relTime(st.last_refresh_s, now)) : null,
+    line('Usage updated', p.updated_at ? relTime(p.updated_at, now) : '—'),
     p.error ? h('small', { className: 'ah-usage-err' }, p.error) : null
   )
 }
@@ -6313,34 +6463,34 @@ function LoginPanel({ agent, provider, onDone }) {
   return h(
     'div',
     { className: 'ah-login' },
-    !sess && !err ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Đang mở luồng đăng nhập của Hermes…') : null,
+    !sess && !err ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Starting Hermes’s login flow…') : null,
     sess && sess.user_code
       ? h(
           'div',
           { className: 'ah-login-step' },
-          h('span', null, '1. Mở trang xác nhận và nhập mã:'),
+          h('span', null, '1. Open the verification page and enter the code:'),
           h('code', { className: 'ah-login-code' }, sess.user_code),
-          h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => navigator.clipboard && navigator.clipboard.writeText(sess.user_code) }, h(Icon, { name: 'copy', size: 14 }), ' Chép mã')
+          h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => navigator.clipboard && navigator.clipboard.writeText(sess.user_code) }, h(Icon, { name: 'copy', size: 14 }), ' Copy code')
         )
       : null,
     link
-      ? h('div', { className: 'ah-login-step' }, h('a', { className: 'ah-btn ah-btn-tonal ah-btn-sm', href: link, target: '_blank', rel: 'noreferrer' }, h(Icon, { name: 'link-external', size: 14 }), sess.user_code ? ' Mở trang xác nhận' : ' Mở trang authorize'))
+      ? h('div', { className: 'ah-login-step' }, h('a', { className: 'ah-btn ah-btn-tonal ah-btn-sm', href: link, target: '_blank', rel: 'noreferrer' }, h(Icon, { name: 'link-external', size: 14 }), sess.user_code ? ' Open verification page' : ' Open authorize page'))
       : null,
     sess && sess.kind === 'cli' && sess.status === 'pending'
       ? h(
           'form',
           { className: 'ah-login-step', onSubmit: sendCode },
-          h('span', null, sess.needs_code ? '2. Sau khi authorize, dán mã (code#state) vào đây:' : 'Đang chờ Hermes xác nhận mã…'),
-          sess.needs_code ? h('input', { className: 'ah-input ah-mono', type: 'password', autoComplete: 'off', value: code, placeholder: 'Mã authorize', onChange: e => setCode(e.target.value) }) : null,
-          sess.needs_code ? h('button', { type: 'submit', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: busy || !code.trim() }, 'Xác nhận') : null
+          h('span', null, sess.needs_code ? '2. After authorizing, paste the code (code#state) here:' : 'Waiting for Hermes to confirm the code…'),
+          sess.needs_code ? h('input', { className: 'ah-input ah-mono', type: 'password', autoComplete: 'off', value: code, placeholder: 'Authorization code', onChange: e => setCode(e.target.value) }) : null,
+          sess.needs_code ? h('button', { type: 'submit', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: busy || !code.trim() }, 'Confirm') : null
         )
       : null,
-    sess && sess.status === 'pending' && sess.kind !== 'cli' ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Đang chờ xác nhận trên trình duyệt…') : null,
-    sess && sess.status === 'approved' ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'pass', size: 12 }), ' Đã đăng nhập.') : null,
-    sess && ['error', 'expired', 'denied'].includes(sess.status) ? h('p', { className: 'ah-live-error', role: 'alert' }, sess.error || `Đăng nhập không thành công (${sess.status}).`) : null,
-    sess && sess.log && sess.log.length && sess.status !== 'approved' ? h('details', { className: 'ah-login-log' }, h('summary', null, 'Nhật ký lệnh'), h('pre', null, sess.log.join('\n'))) : null,
+    sess && sess.status === 'pending' && sess.kind !== 'cli' ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Waiting for confirmation in the browser…') : null,
+    sess && sess.status === 'approved' ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'pass', size: 12 }), ' Logged in.') : null,
+    sess && ['error', 'expired', 'denied'].includes(sess.status) ? h('p', { className: 'ah-live-error', role: 'alert' }, sess.error || `Login failed (${sess.status}).`) : null,
+    sess && sess.log && sess.log.length && sess.status !== 'approved' ? h('details', { className: 'ah-login-log' }, h('summary', null, 'Command log'), h('pre', null, sess.log.join('\n'))) : null,
     err ? h('p', { className: 'ah-live-error', role: 'alert' }, err) : null,
-    h('div', { className: 'ah-edit-actions' }, h('span', { className: 'ah-spacer' }), h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: cancel }, sess && sess.status === 'approved' ? 'Đóng' : 'Hủy'))
+    h('div', { className: 'ah-edit-actions' }, h('span', { className: 'ah-spacer' }), h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: cancel }, sess && sess.status === 'approved' ? 'Close' : 'Cancel'))
   )
 }
 
@@ -6367,10 +6517,10 @@ function ProviderRow({ agent, p, usage, now }) {
       'div',
       { className: 'ah-acct-head' },
       h('span', { className: cx('ah-acct-dot', ok ? 'is-ok' : 'is-off') }),
-      h('div', { className: 'ah-acct-main' }, h('b', null, p.label || p.name), h('span', { className: 'ah-row-sub' }, ok ? `Đã đăng nhập · ${viaCC && !st.logged_in ? 'qua Claude Code' : shown.source_label || shown.source || ''}` : 'Chưa đăng nhập')),
-      ok && shown.expires_at_s ? h('span', { className: 'ah-row-sub', title: fmtClock(shown.expires_at_s) }, `Token còn ${untilText(shown.expires_at_s, now)}${shown.has_refresh_token ? ' · tự làm mới' : ''}`) : null,
+      h('div', { className: 'ah-acct-main' }, h('b', null, p.label || p.name), h('span', { className: 'ah-row-sub' }, ok ? `Logged in · ${viaCC && !st.logged_in ? 'via Claude Code' : shown.source_label || shown.source || ''}` : 'Not logged in')),
+      ok && shown.expires_at_s ? h('span', { className: 'ah-row-sub', title: fmtClock(shown.expires_at_s) }, `Token valid for ${untilText(shown.expires_at_s, now)}${shown.has_refresh_token ? ' · auto-refresh' : ''}`) : null,
       h('span', { className: 'ah-spacer' }),
-      canLogin && !login ? h('button', { type: 'button', className: cx('ah-btn ah-btn-sm ah-state', ok ? 'ah-btn-text' : 'ah-btn-tonal'), onClick: () => setLogin(true) }, h(Icon, { name: 'key', size: 14 }), ok ? ' Đăng nhập lại' : ' Đăng nhập') : null,
+      canLogin && !login ? h('button', { type: 'button', className: cx('ah-btn ah-btn-sm ah-state', ok ? 'ah-btn-text' : 'ah-btn-tonal'), onClick: () => setLogin(true) }, h(Icon, { name: 'key', size: 14 }), ok ? ' Log in again' : ' Log in') : null,
       !canLogin && p.cli_command ? h('code', { className: 'ah-row-sub ah-mono' }, p.cli_command) : null
     ),
     login ? h(LoginPanel, { agent, provider: p.id, onDone: done }) : null
@@ -6397,22 +6547,22 @@ function Accounts({ s, agent }) {
 
   return h(
     SectionCard,
-    { title: 'Tài khoản model', icon: 'account' },
+    { title: 'Model accounts', icon: 'account' },
     h(
       'div',
       { className: 'ah-acct-list' },
-      !pv ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Đang kiểm tra đăng nhập…') : null,
-      pv && pv.status === 'error' && !rows.length ? h(ErrorState, { message: 'Không đọc được trạng thái đăng nhập.', detail: pv.error, onRetry: () => void fetchProviders(agent) }) : null,
+      !pv ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Checking logins…') : null,
+      pv && pv.status === 'error' && !rows.length ? h(ErrorState, { message: 'Could not read login status.', detail: pv.error, onRetry: () => void fetchProviders(agent) }) : null,
       main.map(p => h(ProviderRow, { key: p.id, agent, p, usage: usageRows.find(u => u.id === p.id), now })),
       other.length
         ? h(
             'details',
             { className: 'ah-acct-more', open: more, onToggle: e => setMore(e.target.open) },
-            h('summary', null, `Nhà cung cấp khác (${other.filter(p => p.status && p.status.logged_in).length}/${other.length} đã đăng nhập)`),
+            h('summary', null, `Other providers (${other.filter(p => p.status && p.status.logged_in).length}/${other.length} logged in)`),
             more ? other.map(p => h(ProviderRow, { key: p.id, agent, p, now })) : null
           )
         : null,
-      h('p', { className: 'ah-field-hint' }, 'Đăng nhập dùng đúng luồng của Hermes (như Settings > Accounts). Token do Hermes lưu; Agents Hub chỉ đọc trạng thái và usage.')
+      h('p', { className: 'ah-field-hint' }, 'Logins use Hermes’s own flows (as in Settings > Accounts). Hermes stores the tokens; Agents Hub only reads status and usage.')
     )
   )
 }
@@ -6452,7 +6602,7 @@ function TeamEditor({ s }) {
     try {
       await C.rest('/setup', { method: 'POST', body: {} })
       await fetchTeam()
-      setMsg('Đã chạy lại khởi tạo: cập nhật danh sách nhóm và TEAM.md.')
+      setMsg('Setup re-run: team roster and TEAM.md updated.')
     } catch (err) {
       setMsg(errText(err))
     }
@@ -6462,22 +6612,22 @@ function TeamEditor({ s }) {
 
   return h(
     SectionCard,
-    { title: 'Nhóm agent', icon: 'organization' },
+    { title: 'Team', icon: 'organization' },
     h(
       'div',
       { className: 'ah-team' },
       h(
         'div',
         { className: 'ah-works-bar' },
-        h('span', { className: 'ah-row-sub' }, `${rows.length} thành viên · agent đọc danh sách ở TEAM.md để điều phối`),
+        h('span', { className: 'ah-row-sub' }, `${rows.length} members · agents read TEAM.md to coordinate`),
         h('span', { className: 'ah-spacer' }),
-        h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', disabled: busy, onClick: () => void rerun() }, h(Icon, { name: 'refresh', size: 14 }), ' Chạy lại khởi tạo'),
-        form ? null : h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', onClick: () => setForm(true) }, h(Icon, { name: 'person-add', size: 14 }), ' Tạo agent')
+        h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', disabled: busy, onClick: () => void rerun() }, h(Icon, { name: 'refresh', size: 14 }), ' Re-run setup'),
+        form ? null : h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', onClick: () => setForm(true) }, h(Icon, { name: 'person-add', size: 14 }), ' New agent')
       ),
       msg ? h('p', { className: 'ah-row-sub', role: 'status' }, msg) : null,
-      form ? h(NewAgentForm, { rows, onClose: made => { setForm(false); if (made) { setMsg(`Đã tạo agent "${made}".`); void fetchTeam(); void load() } } }) : null,
-      !t ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Đang tải nhóm…') : null,
-      t && t.status === 'error' && !rows.length ? h(ErrorState, { message: 'Không tải được nhóm (cần restart gateway sau khi cập nhật plugin).', detail: t.error, onRetry: () => void fetchTeam() }) : null,
+      form ? h(NewAgentForm, { rows, onClose: made => { setForm(false); if (made) { setMsg(`Created agent "${made}".`); void fetchTeam(); void load() } } }) : null,
+      !t ? h('p', { className: 'ah-row-sub' }, h(Icon, { name: 'loading', size: 12, spinning: true }), ' Loading team…') : null,
+      t && t.status === 'error' && !rows.length ? h(ErrorState, { message: 'Could not load the team (restart the gateway after updating the plugin).', detail: t.error, onRetry: () => void fetchTeam() }) : null,
       rows.map(r =>
         edit === r.id
           ? h(TeamRowEdit, { key: r.id, r, rows, busy, onSave: body => void save(r.id, body), onCancel: () => setEdit(null) })
@@ -6485,13 +6635,13 @@ function TeamEditor({ s }) {
               'div',
               { key: r.id, className: 'ah-team-row' },
               h(Avatar, { id: r.id, name: r.name, size: 36 }),
-              h('div', { className: 'ah-team-main' }, h('b', null, r.name || r.id, h('span', { className: 'ah-row-sub ah-mono' }, ` ${r.id}`)), h('span', { className: 'ah-row-sub' }, `${r.role || 'Agent'} · báo cáo ${agentLabel(rows, r.reports_to)}`), r.capabilities ? h('span', { className: 'ah-row-sub ah-team-cap' }, r.capabilities) : null),
-              h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', title: 'Sinh khuôn mặt ngẫu nhiên mới', disabled: busy, onClick: () => void save(r.id, { avatar: 'random' }) }, h(Icon, { name: 'refresh', size: 14 }), ' Đổi avatar'),
-              h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', disabled: busy, onClick: () => setEdit(r.id) }, h(Icon, { name: 'edit', size: 14 }), ' Sửa')
+              h('div', { className: 'ah-team-main' }, h('b', null, r.name || r.id, h('span', { className: 'ah-row-sub ah-mono' }, ` ${r.id}`)), h('span', { className: 'ah-row-sub' }, `${r.role || 'Agent'} · reports to ${agentLabel(rows, r.reports_to)}`), r.capabilities ? h('span', { className: 'ah-row-sub ah-team-cap' }, r.capabilities) : null),
+              h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', title: 'Generate a new random face', disabled: busy, onClick: () => void save(r.id, { avatar: 'random' }) }, h(Icon, { name: 'refresh', size: 14 }), ' New avatar'),
+              h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', disabled: busy, onClick: () => setEdit(r.id) }, h(Icon, { name: 'edit', size: 14 }), ' Edit')
             )
       ),
       t && t.data && t.data.skills && t.data.skills.length
-        ? h('p', { className: 'ah-field-hint' }, 'Agent tự đọc hướng dẫn: ', t.data.skills.map((k, i) => h('code', { key: k.name, title: k.description }, `${i ? ', ' : ''}${k.name}`)))
+        ? h('p', { className: 'ah-field-hint' }, 'Agents read the guides: ', t.data.skills.map((k, i) => h('code', { key: k.name, title: k.description }, `${i ? ', ' : ''}${k.name}`)))
         : null
     )
   )
@@ -6511,10 +6661,10 @@ function TeamRowEdit({ r, rows, busy, onSave, onCancel }) {
   return h(
     'form',
     { className: 'ah-team-edit', onSubmit: e => { e.preventDefault(); onSave(v) } },
-    h('div', { className: 'ah-sched-grid' }, field('Tên hiển thị', h('input', { className: 'ah-input', value: v.name, onChange: set('name') })), field('Vai trò', h('input', { className: 'ah-input', value: v.role, onChange: set('role') }))),
-    field('Báo cáo cho', h('select', { className: 'ah-input', value: v.reports_to, onChange: set('reports_to') }, h('option', { value: 'Owner' }, 'Owner'), rows.filter(x => x.id !== r.id).map(x => h('option', { key: x.id, value: x.id }, x.name || x.id)), v.reports_to && v.reports_to !== 'Owner' && !rows.some(x => x.id === v.reports_to) ? h('option', { value: v.reports_to }, v.reports_to) : null)),
-    field('Nhiệm vụ / năng lực (agent dùng để chọn người giao việc)', h('textarea', { className: 'ah-input', rows: 3, value: v.capabilities, onChange: set('capabilities') })),
-    h('div', { className: 'ah-edit-actions' }, h('span', { className: 'ah-spacer' }), h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: onCancel }, 'Hủy'), h('button', { type: 'submit', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: busy }, 'Lưu'))
+    h('div', { className: 'ah-sched-grid' }, field('Display name', h('input', { className: 'ah-input', value: v.name, onChange: set('name') })), field('Role', h('input', { className: 'ah-input', value: v.role, onChange: set('role') }))),
+    field('Reports to', h('select', { className: 'ah-input', value: v.reports_to, onChange: set('reports_to') }, h('option', { value: 'Owner' }, 'Owner'), rows.filter(x => x.id !== r.id).map(x => h('option', { key: x.id, value: x.id }, x.name || x.id)), v.reports_to && v.reports_to !== 'Owner' && !rows.some(x => x.id === v.reports_to) ? h('option', { value: v.reports_to }, v.reports_to) : null)),
+    field('Duties / strengths (agents use this to pick who gets work)', h('textarea', { className: 'ah-input', rows: 3, value: v.capabilities, onChange: set('capabilities') })),
+    h('div', { className: 'ah-edit-actions' }, h('span', { className: 'ah-spacer' }), h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: onCancel }, 'Cancel'), h('button', { type: 'submit', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: busy }, 'Save'))
   )
 }
 
@@ -6529,7 +6679,7 @@ function NewAgentForm({ rows, onClose }) {
     e.preventDefault()
 
     if (!v.id || !v.role.trim()) {
-      setErr('Cần id và vai trò.')
+      setErr('Id and role are required.')
 
       return
     }
@@ -6550,18 +6700,18 @@ function NewAgentForm({ rows, onClose }) {
   return h(
     'form',
     { className: 'ah-sched-form', onSubmit: submit },
-    h('div', { className: 'ah-team-new-head' }, h('span', { className: 'ah-avatar is-face mood-happy', style: { '--ah-ac': agentColor(seed), '--ah-size': '44px' } }, h(Face, { id: seed, seed, mood: 'happy' })), h('span', { className: 'ah-row-sub' }, 'Avatar được sinh ngẫu nhiên; đổi lại được sau.')),
-    h('div', { className: 'ah-sched-grid' }, field('Id (tên profile)', h('input', { className: 'ah-input ah-mono', value: v.id, placeholder: 'vd: qa-tester', onChange: set('id') })), field('Tên hiển thị', h('input', { className: 'ah-input', value: v.name, placeholder: 'vd: QA Tester', onChange: set('name') }))),
-    field('Vai trò', h('input', { className: 'ah-input', value: v.role, placeholder: 'vd: Kiểm thử chất lượng', onChange: set('role') })),
-    field('Nhiệm vụ / năng lực', h('textarea', { className: 'ah-input', rows: 3, value: v.capabilities, placeholder: 'Agent này làm gì, giỏi gì, không làm gì', onChange: set('capabilities') }), 'Ghi vào SOUL.md và TEAM.md để các agent khác biết khi nào giao việc cho agent này.'),
+    h('div', { className: 'ah-team-new-head' }, h('span', { className: 'ah-avatar is-face mood-happy', style: { '--ah-ac': agentColor(seed), '--ah-size': '44px' } }, h(Face, { id: seed, seed, mood: 'happy' })), h('span', { className: 'ah-row-sub' }, 'The avatar is random; you can change it later.')),
+    h('div', { className: 'ah-sched-grid' }, field('Id (profile name)', h('input', { className: 'ah-input ah-mono', value: v.id, placeholder: 'vd: qa-tester', onChange: set('id') })), field('Display name', h('input', { className: 'ah-input', value: v.name, placeholder: 'vd: QA Tester', onChange: set('name') }))),
+    field('Role', h('input', { className: 'ah-input', value: v.role, placeholder: 'e.g. Quality assurance', onChange: set('role') })),
+    field('Duties / strengths', h('textarea', { className: 'ah-input', rows: 3, value: v.capabilities, placeholder: 'What this agent does, is good at, and does not do', onChange: set('capabilities') }), 'Written to SOUL.md and TEAM.md so other agents know when to hand it work.'),
     h(
       'div',
       { className: 'ah-sched-grid' },
-      field('Báo cáo cho', h('select', { className: 'ah-input', value: v.reports_to, onChange: set('reports_to') }, rows.map(x => h('option', { key: x.id, value: x.id }, x.name || x.id)))),
-      field('Sao chép cấu hình từ', h('select', { className: 'ah-input', value: v.clone_from, onChange: set('clone_from') }, rows.map(x => h('option', { key: x.id, value: x.id }, x.name || x.id))), 'Dùng chung model và đăng nhập.')
+      field('Reports to', h('select', { className: 'ah-input', value: v.reports_to, onChange: set('reports_to') }, rows.map(x => h('option', { key: x.id, value: x.id }, x.name || x.id)))),
+      field('Copy config from', h('select', { className: 'ah-input', value: v.clone_from, onChange: set('clone_from') }, rows.map(x => h('option', { key: x.id, value: x.id }, x.name || x.id))), 'Shares model and logins.')
     ),
     err ? h('p', { className: 'ah-live-error', role: 'alert' }, err) : null,
-    h('div', { className: 'ah-edit-actions' }, h('span', { className: 'ah-spacer' }), h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', disabled: busy, onClick: () => onClose(null) }, 'Hủy'), h('button', { type: 'submit', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: busy }, busy ? h(Icon, { name: 'loading', size: 14, spinning: true }) : h(Icon, { name: 'person-add', size: 14 }), ' Tạo agent'))
+    h('div', { className: 'ah-edit-actions' }, h('span', { className: 'ah-spacer' }), h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', disabled: busy, onClick: () => onClose(null) }, 'Cancel'), h('button', { type: 'submit', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: busy }, busy ? h(Icon, { name: 'loading', size: 14, spinning: true }) : h(Icon, { name: 'person-add', size: 14 }), ' New agent'))
   )
 }
 
@@ -6575,7 +6725,7 @@ function ConfigTab({ s }) {
     h(
       'div',
       { className: 'ah-works-bar' },
-      h('label', { className: 'ah-config-pick' }, h('span', { className: 'ah-field-label' }, 'Tài khoản của agent'), h('select', { className: 'ah-input', value: agent, onChange: e => setAgent(e.target.value) }, agents.map(a => h('option', { key: a.id, value: a.id }, a.name || a.id)))),
+      h('label', { className: 'ah-config-pick' }, h('span', { className: 'ah-field-label' }, 'Agent'), h('select', { className: 'ah-input', value: agent, onChange: e => setAgent(e.target.value) }, agents.map(a => h('option', { key: a.id, value: a.id }, a.name || a.id)))),
       h('span', { className: 'ah-spacer' }),
       h(UsageBar, { s, agent })
     ),
@@ -6590,8 +6740,8 @@ function SettingsGeneral() {
   return h(
     'div',
     { style: { display: 'flex', flexDirection: 'column', gap: 8, padding: 4, maxWidth: '64ch', lineHeight: 1.55 } },
-    h('p', { style: { margin: 0, fontWeight: 500 } }, 'Cách mở Agents Hub'),
-    h('p', { style: { margin: 0, opacity: 0.8 } }, 'Chọn mục Agents Hub ở thanh bên, dùng bảng lệnh (Mở Agents Hub) hoặc nhấn Ctrl+Alt+H. Plugin không tự chuyển trang khi khởi động, nên các phiên chat luôn mở đúng nơi bạn để lại.')
+    h('p', { style: { margin: 0, fontWeight: 500 } }, 'Opening Agents Hub'),
+    h('p', { style: { margin: 0, opacity: 0.8 } }, 'Pick Agents Hub in the sidebar, use the command palette (Open Agents Hub) or press Ctrl+Alt+H. The plugin never switches pages on startup, so chats reopen where you left them.')
   )
 }
 
@@ -6662,7 +6812,7 @@ const MATERIAL_DARK = {
 const MATERIAL_THEME = {
   name: 'hermes-material',
   label: 'Hermes Material',
-  description: 'Material 3, tông chàm, bề mặt phân tầng',
+  description: 'Material 3, indigo tones, layered surfaces',
   colors: MATERIAL_LIGHT,
   darkColors: MATERIAL_DARK,
   typography: { fontSans: SANS, fontMono: MONO }
@@ -7107,6 +7257,21 @@ const CSS = `
 
 /* popovers: model, reasoning, slash */
 .ah-root .ah-composer{position:relative}
+.ah-root .ah-automsg.is-compact{display:flex;align-items:center;gap:6px;padding:2px 10px;border:0;background:transparent;color:var(--ah-on-surface-variant);font-size:12px}
+.ah-root .ah-automsg.is-compact .ah-automsg-time{margin-left:auto}
+.ah-root .ah-queue{display:flex;flex-direction:column;gap:4px;margin:0 0 6px}
+.ah-root .ah-queue-item{display:flex;align-items:center;gap:8px;min-height:34px;padding:4px 6px 4px 10px;border:1px solid var(--ah-outline-variant);border-radius:var(--ah-r-md);background:var(--ah-surface-low);font-size:13px}
+.ah-root .ah-queue-ic{color:var(--ah-on-surface-variant);flex:none}
+.ah-root .ah-queue-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ah-root .ah-queue-att{display:inline-flex;align-items:center;gap:2px;font-size:11px;color:var(--ah-on-surface-variant)}
+.ah-root .ah-queue-err{color:var(--ah-err);display:inline-flex}
+.ah-root .ah-queue-steer{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 10px;border:0;border-radius:999px;background:var(--ah-primary-container);color:var(--ah-on-primary-container);font:inherit;font-size:12px;font-weight:600;cursor:pointer}
+.ah-root .ah-queue-steer:disabled{opacity:.45;cursor:default}
+.ah-root .ah-queue-remove{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border:0;border-radius:50%;background:transparent;color:var(--ah-on-surface-variant);cursor:pointer}
+.ah-root .ah-queue-remove:hover{background:var(--ah-surface-highest);color:var(--ah-err)}
+.ah-root .ah-queue-hint{font-size:11px;color:var(--ah-on-surface-variant);padding-left:2px}
+.ah-root .ah-live-steer{display:flex;align-items:baseline;gap:6px;margin:4px 0 0;font-size:12px;color:var(--ah-on-surface-variant)}
+.ah-root .ah-live-steer b{color:var(--ah-primary);font-weight:600}
 .ah-root .ah-usage{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-height:22px;padding:2px 4px 0;font-size:11.5px;line-height:16px;color:var(--ah-on-surface-variant)}
 .ah-root .ah-usage-muted{display:inline-flex;align-items:center;gap:4px;opacity:.8}
 .ah-root .ah-usage-chip{position:relative;display:inline-flex;align-items:center;gap:7px;height:22px;padding:0 8px;border:1px solid var(--ah-outline-variant);border-radius:999px;background:var(--ah-surface);color:var(--ah-on-surface-variant);font:inherit;cursor:default;outline:0}
@@ -7526,12 +7691,12 @@ export default {
       {
         id: 'open',
         area: PALETTE_AREA,
-        data: { id: 'agents-hub.open', label: 'Mở Agents Hub', keywords: ['agents', 'hub', 'agent', 'hội thoại', 'schedules', 'lịch', 'tasks', 'thay đổi'], run: open }
+        data: { id: 'agents-hub.open', label: 'Open Agents Hub', keywords: ['agents', 'hub', 'agent', 'conversations', 'schedules', 'schedule', 'tasks', 'changes'], run: open }
       },
       {
         id: 'open-key',
         area: KEYBINDS_AREA,
-        data: { id: 'agents-hub.open', label: 'Mở Agents Hub', category: 'Agents Hub', defaults: ['mod+alt+h'], run: open }
+        data: { id: 'agents-hub.open', label: 'Open Agents Hub', category: 'Agents Hub', defaults: ['mod+alt+h'], run: open }
       },
       { id: 'theme-hermes-material', area: THEMES_AREA, data: MATERIAL_THEME }
     ])

@@ -1,9 +1,9 @@
 {
   "name": "agents-hub",
   "label": "Agents Hub",
-  "description": "Agents Hub: chat with and coordinate every Hermes profile — agents with moods, goals, file changes with rollback, permission requests, running commands, schedules, team roster, provider logins and usage.",
+  "description": "Agents Hub: chat with, steer and coordinate every Hermes profile: goals, file changes with rollback, permission requests, running commands, scheduled jobs, team roster, provider logins and usage.",
   "icon": "Users",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "tab": {
     "hidden": true
   },

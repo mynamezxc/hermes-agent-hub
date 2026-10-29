@@ -1,51 +1,51 @@
 ---
 name: hub-setup
 description: "Use when setting up Agents Hub on a new Hermes install, creating a new agent, or explaining how the Hub is wired (team roster, avatars, accounts, usage)."
-version: 1.0.0
+version: 1.1.0
 ---
 
-# Khởi tạo Agents Hub và tạo agent
+# Setting up Agents Hub and creating agents
 
-## Cài đặt (một lần)
+## Install (once)
 
 ```
-hermes plugins install mynamezxc/gaugau-agent      # hoặc clone vào <HERMES_HOME>/plugins/agents-hub
-hermes plugins enable agents-hub
+curl -fsSL https://raw.githubusercontent.com/mynamezxc/hermes-agent-hub/main/install.sh | bash      # macOS / Linux
+irm https://raw.githubusercontent.com/mynamezxc/hermes-agent-hub/main/install.ps1 | iex             # Windows
+# or: hermes plugins install mynamezxc/hermes-agent-hub --enable
 ```
 
-Khởi động lại gateway (Desktop: Ctrl+K → "Restart gateway"), rồi bật plugin desktop "Agents Hub" trong
-Capabilities → Plugins và mở trang `/hub`.
+The scripts check that Hermes is installed, install or update the plugin and enable it. Then restart the gateway
+(Desktop: Ctrl+K, "Restart gateway"). Hermes Desktop picks up the page by itself; open Agents Hub from the sidebar.
 
-Lần đầu mở Hub, plugin tự làm phần khởi tạo. Bấm "Chạy lại khởi tạo" ở tab Cấu hình nếu muốn làm lại. Phần khởi tạo gồm:
-- `agents-hub/team.json`: mỗi profile Hermes thành một thành viên. Tên lấy từ `display_name` trong `profile.yaml`,
-  vai trò lấy từ `description`, mặc định báo cáo cho `default`, và có avatar ngẫu nhiên.
-  Mục đã có sẵn thì giữ nguyên, owner sửa trong tab Cấu hình.
-- `agents-hub/TEAM.md`: cùng danh sách đó, viết cho agent đọc khi điều phối.
-- `agents-hub/setup.json`: đánh dấu phiên bản đã khởi tạo.
+The first time the Hub opens it runs setup (or press "Re-run setup" in the Settings tab):
+- `agents-hub/team.json`: every Hermes profile becomes a member: name from `display_name` in `profile.yaml`, role from
+  `description`, reports to `default`, and a random avatar. Existing entries are kept as the owner edited them.
+- `agents-hub/TEAM.md`: the same roster, written for agents to read when they coordinate.
+- `agents-hub/setup.json`: the setup version marker.
 
-Hub không sửa `SOUL.md` hay `config.yaml` của các profile đang có.
+The Hub never changes an existing profile's `SOUL.md` or `config.yaml`.
 
-## Tạo agent mới
+## Creating an agent
 
-Tạo trong Hub: tab Cấu hình → "Tạo agent". Nhập id, tên, vai trò, năng lực, báo cáo cho ai, và sao chép cấu hình từ ai.
-Hub gọi `hermes_cli.profiles.create_profile(id, clone_from=…, clone_config=True)` để agent mới dùng cùng đăng nhập
-model, ghi `profile.yaml` (tên và mô tả), viết `SOUL.md` theo vai trò (có trỏ tới skill `agents-hub:hub-operating`
-và `TEAM.md`), thêm agent vào nhóm với avatar ngẫu nhiên, rồi sinh lại `TEAM.md`.
+In the Hub: Settings tab, "New agent". Enter id, name, role, strengths, who it reports to and which agent to copy the
+config from. The Hub calls `hermes_cli.profiles.create_profile(id, clone_from=…, clone_config=True)` so the new agent
+shares the model login, writes `profile.yaml` (name, description), writes a role `SOUL.md` that points to
+`agents-hub:hub-operating` and `TEAM.md`, adds the agent to the team with a random avatar and regenerates `TEAM.md`.
 
-Tạo từ terminal cũng được, Hub tự nhận profile mới ở lần mở sau:
-`hermes profile create <id> --clone` rồi sửa `profiles/<id>/SOUL.md`.
+From a terminal works too; the Hub picks the new profile up next time it opens:
+`hermes profile create <id> --clone`, then edit `profiles/<id>/SOUL.md`.
 
-Avatar là khuôn mặt hoạt hình sinh từ một seed. Seed ngẫu nhiên khi tạo agent, bấm "Đổi avatar" để lấy mặt mới.
-Nét mặt đổi theo việc agent đang làm: tập trung khi chạy lệnh, suy nghĩ khi suy luận, đặt câu hỏi khi chờ quyền,
-vui khi vừa xong, đợi lệnh khi rảnh, ngủ khi ngoại tuyến.
+Avatars are cartoon faces generated from a seed: random for new agents, "New avatar" rolls another. The face follows
+what the agent is doing: focused while running tools, thinking while reasoning, asking while waiting for a permission,
+happy when done, waiting when idle, asleep when offline.
 
-## Tài khoản và usage
+## Accounts and usage
 
-Tab Cấu hình dùng đúng các luồng đăng nhập của Hermes:
-- Codex (ChatGPT): luồng device-code của Hermes. Hub hiện mã và link, owner xác nhận trên trình duyệt.
-- Claude: chạy `hermes [-p <id>] auth add anthropic`, mở link authorize, owner dán mã vào ô trong Hub.
-  Đăng nhập sẵn có của Claude Code (`~/.claude`) cũng được nhận.
+The Settings tab uses Hermes's own login flows:
+- Codex (ChatGPT): Hermes's device-code flow. The Hub shows the code and link; the owner confirms in the browser.
+- Claude: runs `hermes [-p <id>] auth add anthropic`, opens the authorize link, the owner pastes the code into the Hub.
+  An existing Claude Code login (`~/.claude`) is recognized too.
 
-Dưới ô chat là usage của Claude và Codex: phiên 5 giờ, tuần, thời điểm reset, và lúc token hết hạn hoặc tự làm mới.
-Số liệu lấy qua bộ đọc usage của Hermes (chỉ đọc, không làm mới token), lưu tạm 10 phút, và luôn hiện số gần nhất.
-Không bao giờ in, chép hay gửi token. Hub chỉ trả về trạng thái và phần trăm.
+Under the chat box the Hub shows Claude and Codex usage: 5-hour session, weekly window, reset times, and when the
+token expires or refreshes. It reads usage with Hermes's read-only usage fetchers, caches it for 10 minutes and always
+keeps the last numbers on screen. Tokens are never printed, copied or sent; the Hub returns status and percentages only.

@@ -1,51 +1,50 @@
 ---
 name: team-coordination
 description: "Use when work needs more than one agent in an Agents Hub team: read TEAM.md, pick members by role, hand off, follow up, review."
-version: 1.0.0
+version: 1.1.0
 ---
 
-# Điều phối công việc trong nhóm agent
+# Coordinating work across the agent team
 
-Chỉ dùng skill này khi việc thật sự cần người khác. Việc làm một mình xong nhanh hơn thì tự làm.
+Use this only when the work really needs someone else. If doing it yourself is faster, do it yourself.
 
-## 1. Biết nhóm có ai
+## 1. Know the team
 
-- Đọc `<HERMES_HOME gốc>/agents-hub/TEAM.md`, gồm: `id`, tên, vai trò, báo cáo cho ai, model và năng lực.
-  Owner sửa danh sách trong Hub (tab Cấu hình) và Hub sinh lại tệp này.
-- Cột "báo cáo cho" cho biết luồng giao việc: giao xuống cho người báo cáo cho mình, báo cáo lên người mình báo cáo.
-  Không giao vượt cấp nếu không có lý do.
+- Read `<root HERMES_HOME>/agents-hub/TEAM.md`: `id`, name, role, who they report to, model and strengths.
+  The owner edits the roster in the Hub (Settings tab) and the Hub regenerates this file.
+- "Reports to" is the line of work: hand work down to people who report to you, report up to the one you report to.
+  Do not skip levels without a reason.
 
-## 2. Chọn người
+## 2. Pick people
 
-1. Tách yêu cầu thành các phần việc có đầu ra cụ thể (tệp, kết quả kiểm thử, bản nháp, quyết định).
-2. Với mỗi phần, chọn thành viên có vai trò hoặc năng lực khớp nhất. Nếu hai người cùng phù hợp thì chọn người
-   có cấp gần mình hơn.
-3. Không ai phù hợp thì tự làm, hoặc báo owner rằng nhóm thiếu năng lực đó. Owner có thể tạo agent mới trong Hub.
-4. Việc tạo ra sản phẩm quan trọng nên có một người khác review (ví dụ người phụ trách quy trình hoặc QA). Tác giả không tự chấm bài của mình.
+1. Split the request into pieces with concrete outputs (files, test results, drafts, decisions).
+2. For each piece, pick the member whose role and strengths fit best. If two fit, pick the one closer to you.
+3. If nobody fits, do it yourself or tell the owner the team lacks that skill (the owner can create an agent in the Hub).
+4. Important output gets a reviewer other than its author (for example a process or QA member).
 
-## 3. Giao việc
+## 3. Hand work off
 
-Viết đề bài vào một tệp (`<thư mục việc>/<id>-<việc>.prompt.md`) gồm:
-mục tiêu, phạm vi (tệp hoặc thư mục được đụng), ràng buộc (không làm gì: chi tiền, đăng ra ngoài, xóa dữ liệu, đọc
-bí mật), tiêu chí nghiệm thu, hạn, và yêu cầu dòng cuối là **một dòng JSON** tóm tắt kết quả.
+Write the brief to a file (`<work folder>/<id>-<task>.prompt.md`): goal, scope (files or folders it may touch),
+constraints (no spending, publishing, deleting data or reading secrets), acceptance criteria, deadline, and ask for a
+**single JSON line** summarizing the result at the end.
 
-Gửi bằng lệnh (chạy nền nếu lâu):
+Send it (in the background if it is long):
 
 ```
 hermes -p <id> chat -Q --oneshot --source tool --query-file <prompt.md>
 ```
 
-Hub hiển thị lượt này thành hội thoại giữa hai agent, và người nhận hiện "Đang làm ở phiên khác" trong chat của họ.
-Việc con nhỏ, không cần vai trò riêng thì dùng `delegate_task` (sub-agent) thay vì một agent khác.
+The Hub shows this as a conversation between the two agents, and the receiver shows "Working in another session".
+For a small sub-task that needs no separate role, use `delegate_task` (a sub-agent) instead.
 
-## 4. Theo dõi và nghiệm thu
+## 4. Follow up and accept
 
-- Ghi mỗi phần việc đã giao thành một goal của mình, ví dụ "Dev Backend xong API đăng nhập (đã test)".
-  Đánh `done` khi đã nhận và kiểm chứng kết quả.
-- Đọc dòng JSON cuối và kiểm tra đầu ra thật (tệp, test, log). Không tin lời tự báo cáo.
-- Kết quả chưa đạt thì giao lại kèm điểm cụ thể cần sửa. Sau 2 lần vẫn không đạt thì báo owner.
+- Track each hand-off as one of your goals, e.g. "Dev Backend ships the login API (tested)". Mark it `done` only after
+  you have received and checked the result.
+- Read the final JSON line and check the real output (files, tests, logs). Do not trust self-reports.
+- Not good enough: send it back with specific fixes. Still failing after two rounds: tell the owner.
 
-## 5. Báo cáo owner
+## 5. Report to the owner
 
-Tóm tắt theo: kết quả, bằng chứng, vướng mắc, cần duyệt. Nêu ai đã làm phần nào.
-Những việc cần owner quyết (chi phí, đăng ra ngoài, quyền truy cập, xóa dữ liệu) luôn hỏi trước, không tự làm.
+Summarize as: result, evidence, blockers, needs approval, and who did what. Anything that needs the owner's decision
+(cost, publishing, access, deleting data) is always asked first, never done on your own.

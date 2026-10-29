@@ -658,22 +658,22 @@ def _msg_select(db: Path) -> tuple[str, str]:
 # User-role rows the owner did not type: gateway notifications, background results, system notes.
 # ``steer`` (an out-of-band message the owner sent mid-turn) and ``skill_invocation`` are the owner's own.
 AUTO_KINDS = {
-    "process_complete": "Tiến trình nền kết thúc",
-    "internal_notification": "Thông báo hệ thống",
-    "async_delegation_complete": "Kết quả giao việc nền",
-    "model_switch": "Đổi model",
-    "personality_switch": "Đổi tính cách",
-    "auto_continue": "Agent tự tiếp tục",
-    "hidden": "Ghi chú hệ thống",
+    "process_complete": "Background process finished",
+    "internal_notification": "System notice",
+    "async_delegation_complete": "Background task result",
+    "model_switch": "Model switch",
+    "personality_switch": "Personality switch",
+    "auto_continue": "Agent continued on its own",
+    "hidden": "System note",
 }
 _AUTO_PREFIXES = (
-    ("[CONTEXT COMPACTION", "Tóm tắt ngữ cảnh"),
-    ("[IMPORTANT: Background process", "Tiến trình nền kết thúc"),
-    ("[IMPORTANT:", "Thông báo hệ thống"),
-    ("[INTERNAL NOTIFICATION", "Thông báo hệ thống"),
-    ("[ASYNC DELEGATION", "Kết quả giao việc nền"),
-    ("[System", "Ghi chú hệ thống"),
-    ("[SYSTEM", "Ghi chú hệ thống"),
+    ("[CONTEXT COMPACTION", "Context compacted"),
+    ("[IMPORTANT: Background process", "Background process finished"),
+    ("[IMPORTANT:", "System notice"),
+    ("[INTERNAL NOTIFICATION", "System notice"),
+    ("[ASYNC DELEGATION", "Background task result"),
+    ("[System", "System note"),
+    ("[SYSTEM", "System note"),
 )
 
 
@@ -684,7 +684,7 @@ def auto_label(role: str, kind: Any, content: str) -> Optional[str]:
     if isinstance(kind, str) and kind:
         if kind in ("steer", "skill_invocation"):
             return None
-        return AUTO_KINDS.get(kind, "Tin tự động")
+        return AUTO_KINDS.get(kind, "Automatic message")
     head = (content or "").lstrip()[:60]
     for prefix, label in _AUTO_PREFIXES:
         if head.startswith(prefix):
@@ -1121,7 +1121,7 @@ def agent_timeline(agent: str, before: Optional[float] = Query(None),
         scheduled = str(row.get("source") or "").lower() == "cron"
         for m in msgs:
             if scheduled and m["role"] == "user" and not m.get("auto"):
-                m["auto"] = "Tác vụ định kỳ"
+                m["auto"] = "Scheduled job"
                 m["auto_summary"] = redact(_clip(" ".join(m["content"].split()), 200))
             items.append({"type": "message", "session_id": sid, **m, "_t": m["timestamp"] or 0.0, "_o": 1})
     items.extend({**h, "_t": h["at"] or 0.0, "_o": 0} for h in _handoff_items(agent, before))
@@ -1374,19 +1374,19 @@ def chat_context(agent: str, sessions: list[dict[str, Any]], files: list[dict[st
         out.append({"path": p, "kind": kind, "label": label, "exists": exists, "denied": is_denied(p)})
 
     for s in reversed(sessions):
-        add(s.get("cwd"), "cwd", "Thư mục làm việc của phiên")
-        add(s.get("git_repo_root"), "repo", "Repo git của phiên")
+        add(s.get("cwd"), "cwd", "Session working folder")
+        add(s.get("git_repo_root"), "repo", "Session git repo")
     term = _load_cfg(home).get("terminal")
     if isinstance(term, dict):
-        add(term.get("cwd"), "cwd", "Thư mục mặc định (terminal.cwd)")
+        add(term.get("cwd"), "cwd", "Default folder (terminal.cwd)")
     for r in query(home / "projects.db", "SELECT path, label FROM project_folders"):
-        add(r.get("path"), "project", r.get("label") or "Thư mục dự án")
+        add(r.get("path"), "project", r.get("label") or "Project folder")
     counts: dict[str, int] = {}
     for f in files:
         counts[f["dir"]] = counts.get(f["dir"], 0) + 1
     for d, _n in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:6]:
-        add(d, "touched", "Có tệp được sửa trong phiên")
-    add(str(home), "home", "Hồ sơ agent (HERMES_HOME)")
+        add(d, "touched", "Files edited in this session")
+    add(str(home), "home", "Agent profile (HERMES_HOME)")
     return out
 
 
@@ -1584,11 +1584,11 @@ def plan_file_rollback(agent: str, since: float, session_id: Optional[str] = Non
         plan: dict[str, Any] = {"path": path, "name": PurePosixPath(path).name, "ops_after": len(after),
                                 "method": "unknown", "reason": "", "target": None}
         if is_denied(path):
-            plan["reason"] = "tệp nằm trong danh sách bảo mật"
+            plan["reason"] = "file is on the security deny list"
             plans.append(plan)
             continue
         if p.is_symlink():
-            plan["reason"] = "là liên kết tượng trưng"
+            plan["reason"] = "is a symlink"
             plans.append(plan)
             continue
         current = _read_text_file(p) if p.is_file() else None
@@ -1626,7 +1626,7 @@ def plan_file_rollback(agent: str, since: float, session_id: Optional[str] = Non
             if not tracked:
                 plan.update(method="delete")
         if plan["method"] == "unknown":
-            plan["reason"] = "không đủ dữ liệu trong phiên để dựng lại nội dung trước đó (tệp có thể đã bị sửa ngoài chat)"
+            plan["reason"] = "not enough session data to rebuild the earlier content (the file may have been edited outside the chat)"
         elif plan["method"] != "delete" and current == plan["target"]:
             plan.update(method="unchanged")
         plans.append(plan)
@@ -1940,7 +1940,7 @@ def _cron_backend():
 
 @router.get("/schedules/targets")
 async def schedule_targets(agent: str = Query("default")) -> dict[str, Any]:
-    targets = [{"id": "local", "name": "Local (chỉ lưu)", "home_target_set": True}]
+    targets = [{"id": "local", "name": "Local (save only)", "home_target_set": True}]
     try:
         from hermes_cli.web_routers.cron import get_cron_delivery_targets
         targets = (await get_cron_delivery_targets(agent)).get("targets") or targets
@@ -2174,7 +2174,7 @@ def _new_team_entry(agent: str) -> dict[str, Any]:
     desc = str(meta.get("description") or "").strip()
     return {
         "name": str(meta.get("display_name") or "").strip() or ("Hermes" if agent == "default" else _pretty_id(agent)),
-        "role": _clip(desc.split("\n")[0], 120) if desc else ("Điều phối" if agent == "default" else "Agent"),
+        "role": _clip(desc.split("\n")[0], 120) if desc else ("Coordinator" if agent == "default" else "Agent"),
         "reports_to": OWNER_LABEL if agent == "default" else "default",
         "capabilities": desc,
         "avatar": secrets.token_hex(4),
@@ -2196,7 +2196,7 @@ def _write_team_md(team: dict[str, dict[str, Any]]) -> None:
     lines = [
         "# Team roster (Agents Hub)",
         "",
-        "Generated by Agents Hub from `team.json` — edit the team in the Hub (tab Cấu hình) rather than here.",
+        "Generated by Agents Hub from `team.json` — edit the team in the Hub (Settings tab) rather than here.",
         "Hand work to the member whose role/capabilities fit; see the `agents-hub:team-coordination` skill.",
         "",
         "| id | name | role | reports to | model | good at |",
@@ -2287,16 +2287,16 @@ def team_update(agent: str, body: dict[str, Any]) -> dict[str, Any]:
 
 SOUL_TEMPLATE = """# {name}
 
-Bạn là **{name}** (`{id}`) — {role}. Báo cáo cho: {reports_to}.
+You are **{name}** (`{id}`), {role}. You report to: {reports_to}.
 
-## Nhiệm vụ và năng lực
+## Duties and strengths
 {capabilities}
 
-## Làm việc trong Agents Hub
-- Khi được nhắn qua Agents Hub, đọc skill `agents-hub:hub-operating` (một lần mỗi phiên) để biết cách đặt và cập nhật goal,
-  cách sửa file để Hub theo dõi được thay đổi, và cách xin phép khi lệnh cần duyệt.
-- Cần người khác trong nhóm: xem đội ngũ ở `{team_md}` và skill `agents-hub:team-coordination`.
-- Trả lời ngắn gọn, bằng ngôn ngữ người dùng đang dùng; nói rõ việc đã kiểm chứng, giả định và việc còn chờ.
+## Working in Agents Hub
+- When a message comes through Agents Hub, load the skill `agents-hub:hub-operating` (once per session): how to set and
+  update goals, how to edit files so the Hub can track the changes, and how to ask before commands that need approval.
+- Need someone else on the team: see the roster at `{team_md}` and the skill `agents-hub:team-coordination`.
+- Reply briefly, in the language the owner writes in; say clearly what is verified, what is assumed and what is pending.
 """
 
 
@@ -2308,27 +2308,27 @@ def team_create(body: dict[str, Any]) -> dict[str, Any]:
     the same model login; its SOUL.md is then replaced by one written for the new role."""
     agent = str(body.get("id") or "").strip().lower()
     if not AGENT_ID_RE.match(agent) or agent == "default":
-        raise HTTPException(400, "id: chữ thường, số, '-' hoặc '_' (tối đa 48 ký tự)")
+        raise HTTPException(400, "id: lowercase letters, digits, '-' or '_' (max 48 characters)")
     if agent in list_agents():
-        raise HTTPException(409, "agent đã tồn tại")
+        raise HTTPException(409, "agent already exists")
     name = _clip(str(body.get("name") or "").strip(), 120) or _pretty_id(agent)
     role = _clip(str(body.get("role") or "").strip(), 120) or "Agent"
     caps = _clip(str(body.get("capabilities") or "").strip(), 2000)
     boss = str(body.get("reports_to") or "default").strip() or "default"
     source = str(body.get("clone_from") or "default").strip()
     if source not in list_agents():
-        raise HTTPException(400, "clone_from không hợp lệ")
+        raise HTTPException(400, "invalid clone_from")
     try:
         from hermes_cli.profiles import create_profile, write_profile_meta
     except Exception as e:  # running outside Hermes
-        raise HTTPException(500, f"không gọi được Hermes profiles: {e}")
+        raise HTTPException(500, f"could not call Hermes profiles: {e}")
     try:
         home = create_profile(agent, clone_from=source, clone_config=True, description=caps or role)
         write_profile_meta(Path(home), display_name=name, description=caps or role)
     except Exception as e:
-        raise HTTPException(400, f"tạo profile thất bại: {redact(str(e))}")
+        raise HTTPException(400, f"creating the profile failed: {redact(str(e))}")
     soul = SOUL_TEMPLATE.format(name=name, id=agent, role=role, reports_to=boss,
-                                capabilities=caps or "(chưa mô tả — hỏi người giao việc nếu không rõ phạm vi)",
+                                capabilities=caps or "(not described yet: ask whoever assigns work if the scope is unclear)",
                                 team_md=(_hub_dir("") / "TEAM.md").as_posix())
     (Path(home) / "SOUL.md").write_text(soul, encoding="utf-8")
     team = ensure_team()
@@ -2409,7 +2409,7 @@ async def providers(agent: str = Query("default")) -> dict[str, Any]:
     try:
         data = await _oauth_routes().list_oauth_providers(profile=_profile_arg(agent))
     except Exception as e:
-        raise HTTPException(502, f"không đọc được trạng thái đăng nhập: {redact(str(e))}")
+        raise HTTPException(502, f"could not read login status: {redact(str(e))}")
     rows = []
     for p in data.get("providers") or []:
         rows.append({"id": p.get("id"), "name": p.get("name"), "flow": p.get("flow"),
@@ -2495,7 +2495,7 @@ async def provider_login(provider: str, request: Request, agent: str = Query("de
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"không bắt đầu được đăng nhập: {redact(str(e))}")
+        raise HTTPException(502, f"could not start the login: {redact(str(e))}")
     sid = str(body.get("session_id") or "")
     sess = {"id": sid, "agent": agent, "provider": provider, "kind": "device", "started": time.time(),
             "status": "pending", "user_code": body.get("user_code"),
@@ -2509,7 +2509,7 @@ async def provider_login(provider: str, request: Request, agent: str = Query("de
 async def provider_login_poll(sid: str) -> dict[str, Any]:
     sess = _logins.get(sid)
     if not sess:
-        raise HTTPException(404, "phiên đăng nhập không còn")
+        raise HTTPException(404, "login session expired")
     if sess["kind"] == "device" and sess["status"] == "pending":
         try:
             r = await _oauth_routes().poll_oauth_session(sess["provider"], sid, profile=_profile_arg(sess["agent"]), wait=0)
@@ -2530,12 +2530,12 @@ def provider_login_code(sid: str, body: dict[str, Any]) -> dict[str, Any]:
     sess = _logins.get(sid)
     code = str(body.get("code") or "").strip()
     if not sess or sess["kind"] != "cli":
-        raise HTTPException(404, "phiên đăng nhập không còn")
+        raise HTTPException(404, "login session expired")
     if not code or "\n" in code or len(code) > 2000:
-        raise HTTPException(400, "mã không hợp lệ")
+        raise HTTPException(400, "invalid code")
     proc = sess["proc"]
     if proc.poll() is not None:
-        raise HTTPException(409, "lệnh đăng nhập đã kết thúc")
+        raise HTTPException(409, "the login command already finished")
     proc.stdin.write(code + "\n")
     proc.stdin.flush()
     sess["needs_code"] = False
@@ -2610,7 +2610,7 @@ def _refresh_usage(agent: str, provider: str) -> None:
                 _usage_cache[key] = {**fresh, "at": time.time(), "error": None, "busy": False}
             else:  # keep the last good numbers; remember the failure
                 _usage_cache[key] = {**prev, "status": fresh["status"], "at": prev.get("at"), "failed_at": time.time(),
-                                     "error": "Không lấy được usage lúc này (giữ số liệu gần nhất).", "busy": False}
+                                     "error": "Could not fetch usage right now (keeping the last numbers).", "busy": False}
     except Exception as e:
         with _usage_lock:
             prev = _usage_cache.get(key) or {}

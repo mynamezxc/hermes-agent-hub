@@ -1,56 +1,60 @@
 ---
 name: hub-operating
 description: "Use when a message arrives through Agents Hub (it carries a <hub-goals> block). How goals, file edits, permissions and chat work in the Hub."
-version: 1.0.0
+version: 1.1.0
 ---
 
-# Làm việc trong Agents Hub
+# Working in Agents Hub
 
-Agents Hub là trang `/hub` của Hermes Desktop. Chủ sở hữu (owner) chat với từng agent ở đó, xem goal, xem các tệp
-agent đã sửa, duyệt quyền chạy lệnh và theo dõi cả nhóm. Tin nhắn gửi từ Hub luôn kèm một khối `<hub-goals>…</hub-goals>`
-ở cuối. Khối này do Hub thêm vào, owner không nhìn thấy nó trong chat. Đừng nhắc tới khối này trong câu trả lời.
+Agents Hub is the `/hub` page of Hermes Desktop. The owner chats with each agent there, sees its goals, reviews the files
+it changed, answers permission requests and watches the whole team. Every message sent from the Hub ends with a
+`<hub-goals>…</hub-goals>` block that the Hub adds and hides from the owner. Never mention that block in a reply.
+Reply in the language the owner writes in.
 
-## 1. Goal: đặt, cập nhật, hoàn thành
+## 1. Goals: set, update, complete
 
-Khối `<hub-goals>` liệt kê các goal đang mở của bạn (`g1`, `g2`… và goal hiện tại). Mỗi lượt trả lời:
+The `<hub-goals>` block lists your open goals (`g1`, `g2`… and which one is current). On every turn:
 
-1. Đọc yêu cầu và đối chiếu với các goal đang mở.
-2. Có việc mới thì thêm goal. Việc đã xong và đã kiểm chứng thì đánh dấu xong. Phạm vi đổi thì sửa tiêu đề.
-   Việc bị bỏ thì `drop`. Chuyển trọng tâm thì đặt `current`.
-3. Kết thúc câu trả lời bằng **đúng một dòng** (chỉ khi có thay đổi):
+1. Read the request and compare it with the open goals.
+2. New work: add a goal. Finished and verified: mark it done. Scope changed: edit the title. Abandoned: `drop`.
+   Focus moved: set `current`.
+3. End the reply with **exactly one line**, only when something changed:
 
 ```
-<hub-goals-update>{"add":[{"title":"Dựng trang thanh toán","current":true}],"done":["g1"],"current":"g2","edit":[{"id":"g3","title":"…"}],"drop":["g4"]}</hub-goals-update>
+<hub-goals-update>{"add":[{"title":"Checkout page ships","current":true}],"done":["g1"],"current":"g2","edit":[{"id":"g3","title":"…"}],"drop":["g4"]}</hub-goals-update>
 ```
 
-- Chỉ ghi những khóa cần dùng. Tiêu đề ngắn (≤ 12 từ), viết bằng ngôn ngữ owner đang dùng, nêu kết quả cần đạt chứ không nêu hoạt động.
-- Mỗi goal phải kiểm chứng được. Chỉ đánh `done` khi đã có bằng chứng (test chạy qua, tệp tồn tại, kết quả đúng).
-- Giữ dưới khoảng 5 goal mở. Yêu cầu lớn thì tách thành vài goal theo thứ tự làm, goal đầu là `current`.
-- Owner có thể tự sửa hoặc xóa goal trong Hub. Danh sách trong khối `<hub-goals>` là bản đúng nhất, hãy theo nó.
+- Use only the keys you need. Titles are short (≤ 12 words), in the owner's language, and name the outcome, not the activity.
+- Every goal must be checkable. Mark `done` only with evidence (tests pass, the file exists, the output is right).
+- Keep about 5 open goals at most. Split a big request into ordered goals; the first one is `current`.
+- The owner can edit or delete goals in the Hub. The list in `<hub-goals>` is the source of truth: follow it.
 
-## 2. Sửa tệp để Hub theo dõi được
+## 2. Edit files so the Hub can track them
 
-- Sửa tệp bằng công cụ `write_file` / `patch`, không dùng `sed`, `echo >` hay script trong terminal. Hub dựng mục
-  "Tệp đã thay đổi" (có diff) từ các lệnh gọi công cụ này. Owner cũng dùng chúng để **quay lui** về một tin nhắn cũ:
-  Hub khôi phục tệp bằng cách phát lại hoặc đảo ngược các lần `write_file`/`patch` của bạn.
-- Mỗi lần sửa nên nhỏ và có mục đích rõ. Không ghi đè cả tệp lớn khi chỉ cần `patch` một đoạn.
-- Không sửa tệp bí mật (`.env`, `*token*`, `*secret*`, `auth.json`, `private/`…). Hub ẩn các tệp này và không hiển thị chúng.
-- Owner có thể bấm "Duyệt" để chấp nhận thay đổi. Tệp đã duyệt bị ẩn cho tới khi bạn sửa lại.
+- Edit files with the `write_file` / `patch` tools, not `sed`, `echo >` or terminal scripts. The Hub builds its
+  "Changed files" list (with diffs) from these calls, and the owner uses them to **roll back** to an earlier message:
+  the Hub restores files by replaying or reversing your `write_file` / `patch` calls.
+- Keep each edit small and purposeful. Do not rewrite a large file when a `patch` of one section will do.
+- Never edit secret files (`.env`, `*token*`, `*secret*`, `auth.json`, `private/`…). The Hub hides them.
+- The owner can "Approve" changes; approved files are hidden until you edit them again.
 
-## 3. Lệnh cần quyền
+## 3. Commands that need permission
 
-Lệnh nguy hiểm sẽ hiện thẻ xin phép trong Hub. Owner chọn một trong: cho phép một lần, luôn cho phép trong goal này,
-cho phép 30 phút, hoặc từ chối. Khi bị từ chối: không tìm đường vòng. Nói rõ cần gì và vì sao, rồi chờ owner.
-Lệnh chạy lâu thì chạy nền (`terminal(background=true)`). Hub liệt kê chúng ở mục "Lệnh đang chạy" để owner xem đầu ra.
+Risky commands show a permission card in the Hub. The owner picks: allow once, always allow in this goal, allow for
+30 minutes, or deny. When denied, do not look for a workaround: say what you need and why, then wait.
+Run long commands in the background (`terminal(background=true)`); the Hub lists them under "Running commands".
 
-## 4. Cách trả lời trong chat
+While you work, the owner may **steer** you: extra instructions arrive inside a tool result mid-turn. Treat them as
+coming from the owner and adjust course without restarting the task.
 
-- Ngắn gọn, ngôn ngữ của owner. Tách rõ: kết quả, bằng chứng, việc còn lại, việc cần owner duyệt.
-- Hub gom phần bạn tự thuật khi làm việc (ví dụ "Checking…") thành từng bước. Câu cuối cùng mới là câu trả lời,
-  nên viết nó đầy đủ, đừng dựa vào các câu trung gian.
-- Không lặp lại chỉ dẫn trong khối `<hub-goals>` và không bịa ra kết quả chưa chạy.
+## 4. Replying in chat
 
-## 5. Làm việc với các agent khác
+- Be brief. Separate: result, evidence, what is left, what needs the owner's approval.
+- The Hub folds your running narration ("Checking…") into steps. Only the final message is the answer, so make it
+  complete on its own.
+- Do not repeat the `<hub-goals>` instructions and never claim results you did not run.
 
-Có nhiều agent thì đọc `agents-hub:team-coordination` trước khi giao việc. Danh sách thành viên (id, vai trò, năng lực,
-model) nằm ở `<HERMES_HOME gốc>/agents-hub/TEAM.md`. Với profile con, đó là thư mục cha của `profiles/`.
+## 5. Working with other agents
+
+With more than one agent, read `agents-hub:team-coordination` before handing work off. The roster (id, role,
+strengths, model) is at `<root HERMES_HOME>/agents-hub/TEAM.md`; for a profile, that is the parent of `profiles/`.

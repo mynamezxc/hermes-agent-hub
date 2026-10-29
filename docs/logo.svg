@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Hermes Agent Hub">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5B6CE0"/>
+      <stop offset="1" stop-color="#3B2FA8"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="30" fill="url(#bg)"/>
+  <!-- hub links -->
+  <g stroke="#C9CFFF" stroke-width="3" stroke-linecap="round" opacity=".9">
+    <line x1="64" y1="64" x2="27" y2="30"/>
+    <line x1="64" y1="64" x2="101" y2="30"/>
+    <line x1="64" y1="64" x2="24" y2="98"/>
+    <line x1="64" y1="64" x2="104" y2="98"/>
+  </g>
+  <g fill="#0E9F8E" stroke="#fff" stroke-width="3">
+    <circle cx="27" cy="30" r="9"/>
+    <circle cx="101" cy="30" r="9" fill="#D9822B"/>
+    <circle cx="24" cy="98" r="9" fill="#C2477F"/>
+    <circle cx="104" cy="98" r="9" fill="#3B8FD9"/>
+  </g>
+  <!-- agent face -->
+  <circle cx="64" cy="64" r="27" fill="#F6CDA8" stroke="#fff" stroke-width="4"/>
+  <path d="M38 60 C38 36 90 36 90 60 C82 50 72 47 62 49 C52 50 44 54 38 60 Z" fill="#2B2B33"/>
+  <g stroke="#2B2B33" stroke-width="3.2" stroke-linecap="round" fill="none">
+    <path d="M52 66 Q55.5 62 59 66"/>
+    <path d="M69 66 Q72.5 62 76 66"/>
+  </g>
+  <path d="M55 74 Q64 83 73 74 Z" fill="#B03A48"/>
+</svg>

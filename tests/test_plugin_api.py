@@ -86,7 +86,7 @@ class AgentsHubTest(unittest.TestCase):
         (home / "config.yaml").write_text("model:\n  # c\n  default: \"claude-opus-5-5\"\n  provider: anthropic\n")
         (home / "agents-hub").mkdir(parents=True, exist_ok=True)
         (home / "agents-hub" / "team.json").write_text(json.dumps({"version": 1, "agents": {
-            "default": {"name": "CEO Hermes", "role": "Điều phối", "reports_to": "Owner", "avatar": "default"},
+            "default": {"name": "CEO Hermes", "role": "Coordinator", "reports_to": "Owner", "avatar": "default"},
             "dev-backend": {"name": "Dev Backend", "role": "Lập trình backend", "reports_to": "tech-lead", "avatar": "dev-backend"}}}))
         (home / "profiles" / "dev-backend" / "config.yaml").write_text("model:\n  default: claude-sonnet-5-5\n")
         sess = ("INSERT INTO sessions (id, source, started_at, ended_at, end_reason, parent_session_id, "
@@ -587,13 +587,13 @@ class AutoMessageTest(unittest.TestCase):
 
     def test_auto_label(self):
         f = self.m.auto_label
-        self.assertEqual(f("user", "process_complete", "x"), "Tiến trình nền kết thúc")
-        self.assertEqual(f("user", "weird_new_kind", "x"), "Tin tự động")
+        self.assertEqual(f("user", "process_complete", "x"), "Background process finished")
+        self.assertEqual(f("user", "weird_new_kind", "x"), "Automatic message")
         self.assertIsNone(f("user", "steer", "[OUT-OF-BAND USER MESSAGE"))
         self.assertIsNone(f("user", "skill_invocation", "x"))
-        self.assertIsNone(f("user", None, "Sửa giúp mình [IMPORTANT: x]"))
-        self.assertEqual(f("user", None, "[CONTEXT COMPACTION — REFERENCE ONLY] ..."), "Tóm tắt ngữ cảnh")
-        self.assertEqual(f("user", None, "  [INTERNAL NOTIFICATION — generated"), "Thông báo hệ thống")
+        self.assertIsNone(f("user", None, "Edit giúp mình [IMPORTANT: x]"))
+        self.assertEqual(f("user", None, "[CONTEXT COMPACTION — REFERENCE ONLY] ..."), "Context compacted")
+        self.assertEqual(f("user", None, "  [INTERNAL NOTIFICATION — generated"), "System notice")
         self.assertIsNone(f("assistant", "process_complete", "x"))
 
     def test_stale_open_session_not_running(self):
@@ -608,7 +608,7 @@ class AutoMessageTest(unittest.TestCase):
                "display_kind": "process_complete",
                "display_metadata": json.dumps({"display_text": "Background Process Finished: api_key=sk-" + "z" * 20})}
         out = self.m._shape_message(row, "default", "owner")
-        self.assertEqual(out["auto"], "Tiến trình nền kết thúc")
+        self.assertEqual(out["auto"], "Background process finished")
         self.assertIn("Background Process Finished", out["auto_summary"])
         self.assertNotIn("sk-zzzz", out["auto_summary"])
         plain = self.m._shape_message({**row, "content": "chào", "display_kind": None, "display_metadata": None}, "default", "owner")
@@ -624,7 +624,7 @@ class TeamSetupUsageTest(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
         home = root / "home"
         (home / "profiles" / "writer").mkdir(parents=True)
-        (home / "profiles" / "writer" / "profile.yaml").write_text("display_name: Nhà văn\ndescription: Viết bài SEO và social\n", encoding="utf-8")
+        (home / "profiles" / "writer" / "profile.yaml").write_text("display_name: Nhà văn\ndescription: Viết bài SEO and social\n", encoding="utf-8")
         (home / "config.yaml").write_text("model:\n  default: m\n  provider: anthropic\n", encoding="utf-8")
         os.environ["HERMES_HOME"] = str(home)
         self.home = home
@@ -637,7 +637,7 @@ class TeamSetupUsageTest(unittest.TestCase):
         self.assertEqual(state["version"], self.m.SETUP_VERSION)
         team = self.m.load_team()
         self.assertEqual(team["writer"]["name"], "Nhà văn")  # from profile.yaml
-        self.assertEqual(team["writer"]["role"], "Viết bài SEO và social")
+        self.assertEqual(team["writer"]["role"], "Viết bài SEO and social")
         self.assertEqual(team["writer"]["reports_to"], "default")
         self.assertEqual(team["default"]["reports_to"], "Owner")
         self.assertNotEqual(team["writer"]["avatar"], team["default"]["avatar"])
@@ -915,7 +915,7 @@ class RollbackActivityTest(unittest.TestCase):
             (msg, ("bot", "tool", ok, None, "b3", "patch", now - 387)),
             (msg, ("bot", "tool", ok, None, "b4", "patch", now - 386)),
             (msg, ("work1", "user", "Làm API timeline", None, None, None, now - 300)),
-            (msg, ("work1", "assistant", "Đang chạy test", json.dumps([call("w1", "terminal", {"command": "pytest -q"})]), None, None, now - 20)),
+            (msg, ("work1", "assistant", "Running test", json.dumps([call("w1", "terminal", {"command": "pytest -q"})]), None, None, now - 20)),
             (msg, ("stale", "assistant", "xong", None, None, None, now - 8 * 3600)),
         ])
         os.environ["HERMES_HOME"] = str(home)
