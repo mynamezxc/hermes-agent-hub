@@ -27,7 +27,7 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.12'
+const PLUGIN_VERSION = '1.6.13'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
@@ -1107,7 +1107,9 @@ function reduceTurn(turn, ev, now) {
     case 'error':
       return t ? { ...t, error: String(p.message || p.error || 'Unknown error') } : turn
     case 'message.complete':
-      return t ? { ...t, active: false, phase: 'done', endedMs: now, error: p.error ? String(p.error) : t.error, status: '' } : turn
+      // `saving`: the reply is final but not in the loaded timeline yet. The card stays up (and keeps hiding the
+      // turn's persisted rows) until finishTurn has re-read the timeline, so the answer never blinks out.
+      return t ? { ...t, active: false, saving: true, phase: 'done', endedMs: now, error: p.error ? String(p.error) : t.error, status: '' } : turn
     default:
       return turn
   }
@@ -1220,7 +1222,7 @@ async function finishTurn(agent, { drain = true } = {}) {
 
   if (lv && lv.turn && !lv.turn.active) {
     // Not loaded yet: keep the card (marked unsaved) instead of showing an empty chat; settleUnsaved clears it.
-    setLive(agent, { turn: lv.turn.error ? { ...lv.turn, stale: true } : saved ? null : { ...lv.turn, stale: true, unsaved: true } })
+    setLive(agent, { turn: lv.turn.error ? { ...lv.turn, saving: false, stale: true } : saved ? null : { ...lv.turn, saving: false, stale: true, unsaved: true } })
   }
 
   const st = S && S.send[agent]
@@ -2101,7 +2103,7 @@ async function stopTurn(agent) {
     }
   }
 
-  setLive(agent, cur => ({ turn: cur.turn ? { ...cur.turn, active: false, phase: 'done', status: 'Stopped' } : null }))
+  setLive(agent, cur => ({ turn: cur.turn ? { ...cur.turn, active: false, saving: true, phase: 'done', status: 'Stopped' } : null }))
   void finishTurn(agent, { drain: false })
 }
 
@@ -4919,6 +4921,8 @@ function ChatView({ s }) {
   const lv = s.live[agent] || {}
   const turn = lv.turn || null
   const turnLive = !!(turn && turn.active)
+  // Rows of the turn stay hidden while its card is up, including the short save window after message.complete.
+  const turnHides = !!(turn && (turn.active || turn.saving))
   const chatMeta = s.chat[agent]
   const scrollRef = useRef(null)
   const stick = useRef(true)
@@ -5026,7 +5030,7 @@ function ChatView({ s }) {
     bindPendingAttachments(agent, items)
     const seen = new Set()
     const out = []
-    const hideFrom = turnLive ? turnStart - 1 : null
+    const hideFrom = turnHides ? turnStart - 1 : null
 
     for (const it of items) {
       const key = itemKey(it)
@@ -5075,7 +5079,7 @@ function ChatView({ s }) {
     }
 
     return out
-  }, [tl && tl.latest, tl && tl.older, send.optimistic, send.sentAt, turnLive, turnStart, activityItems])
+  }, [tl && tl.latest, tl && tl.older, send.optimistic, send.sentAt, turnHides, turnStart, activityItems])
 
   const cmds = s.cmdlog[agent] || []
   const liveSig = turn ? `${turn.phase}:${turn.text.length}:${turn.tools.length}:${turn.reasoning.length > 0 ? 1 : 0}:${turn.active ? 1 : 0}` : ''
@@ -5160,7 +5164,7 @@ function ChatView({ s }) {
 
   const chatId = chatMeta && chatMeta.data && chatMeta.data.session_id
   const canOpen = !!chatId && typeof host.openSession === 'function'
-  const showTurn = turn && (turn.active || turn.stale)
+  const showTurn = turn && (turn.active || turn.saving || turn.stale)
 
   let body
 
