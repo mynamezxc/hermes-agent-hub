@@ -2617,6 +2617,12 @@ def _refresh_usage(agent: str, provider: str) -> None:
             _usage_cache[key] = {**prev, "failed_at": time.time(), "error": redact(str(e))[:200], "busy": False}
 
 
+def _window_passed(entry: dict[str, Any], now: float) -> bool:
+    """A cached window whose reset time is behind us carries stale numbers and a stale reset time."""
+    wins = ((entry.get("usage") or {}).get("windows")) or []
+    return any(isinstance(w.get("reset_at"), (int, float)) and w["reset_at"] <= now for w in wins)
+
+
 @router.get("/usage")
 def usage(agent: str = Query("default"), wait: float = Query(0.0, ge=0, le=20)) -> dict[str, Any]:
     """Claude + Codex usage for an agent's login. Answers from cache at once; a stale entry is
@@ -2629,7 +2635,7 @@ def usage(agent: str = Query("default"), wait: float = Query(0.0, ge=0, le=20)) 
         key = (agent, provider)
         with _usage_lock:
             c = _usage_cache.get(key) or {}
-            stale = not c.get("at") or now - c["at"] > USAGE_TTL_S
+            stale = not c.get("at") or now - c["at"] > USAGE_TTL_S or _window_passed(c, now)
             cooling = c.get("failed_at") and now - c["failed_at"] < USAGE_RETRY_S
             start = stale and not cooling and not c.get("busy")
             if start:

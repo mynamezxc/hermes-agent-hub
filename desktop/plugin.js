@@ -6223,6 +6223,32 @@ function windowLong(label) {
   return String(label || '')
 }
 
+// Compact time left until a reset: "2h05m", "45m", "<1m"; null when unknown.
+function untilShort(sec, now) {
+  if (!sec) {
+    return null
+  }
+
+  const left = Math.floor(sec - (now || Date.now()) / 1000)
+
+  if (left <= 0) {
+    return 'resetting'
+  }
+
+  if (left < 60) {
+    return '<1m'
+  }
+
+  const d = Math.floor(left / 86400)
+  const hh = Math.floor((left % 86400) / 3600)
+  const mm = Math.floor((left % 3600) / 60)
+
+  return d ? `${d}d${hh ? `${hh}h` : ''}` : hh ? `${hh}h${String(mm).padStart(2, '0')}m` : `${mm}m`
+}
+
+const isSessionWindow = label => windowShort(label) === '5h'
+const windowsPassed = (p, now) => ((p && p.usage && p.usage.windows) || []).some(w => w.reset_at && w.reset_at * 1000 <= now)
+
 const usageTone = pct => (pct >= 90 ? 'err' : pct >= 70 ? 'warn' : 'ok')
 
 async function fetchUsage(agent, wait = 0) {
@@ -6272,9 +6298,24 @@ function UsageBar({ s, agent }) {
 
     void tick(8)
 
+    // countdowns tick every 30s; a window whose reset time has passed is re-fetched right away
+    const clock = setInterval(() => {
+      const t = Date.now()
+
+      setNow(t)
+
+      const cur = S.usage[agent]
+
+      if (cur && cur.data && (cur.data.providers || []).some(p => windowsPassed(p, t)) && !stop) {
+        clearTimeout(timer)
+        timer = setTimeout(() => void tick(8), 1500)
+      }
+    }, 30000)
+
     return () => {
       stop = true
       clearTimeout(timer)
+      clearInterval(clock)
     }
   }, [agent])
 
@@ -6324,7 +6365,10 @@ function UsageChip({ p, now }) {
             { key: i, className: 'ah-usage-win' },
             h('span', { className: 'ah-usage-meter', 'aria-hidden': 'true' }, h('span', { className: `is-${usageTone(w.used_percent)}`, style: { width: `${Math.min(100, Math.max(2, w.used_percent))}%` } })),
             `${Math.round(w.used_percent)}%`,
-            h('small', null, windowShort(w.label))
+            // session window: time left until it resets (the default view); other windows keep their short name
+            isSessionWindow(w.label) && w.reset_at
+              ? h('small', { className: 'ah-usage-left', title: `Session resets ${fmtClock(w.reset_at)}` }, h(Icon, { name: 'history', size: 11 }), untilShort(w.reset_at, now))
+              : h('small', null, windowShort(w.label))
           )
         )
       : h('small', null, p.loading ? '…' : (p.usage && p.usage.unavailable) || 'no data'),
@@ -6348,14 +6392,15 @@ function UsagePop({ p, now }) {
         { key: i, className: 'ah-usage-wrow' },
         h('div', { className: 'ah-usage-line' }, h('span', null, windowLong(w.label)), h('b', null, `${Math.round(w.used_percent)}% used`)),
         h('span', { className: 'ah-usage-meter is-wide' }, h('span', { className: `is-${usageTone(w.used_percent)}`, style: { width: `${Math.min(100, Math.max(2, w.used_percent))}%` } })),
-        w.reset_at ? h('small', null, `Reset ${fmtClock(w.reset_at)} (in ${untilText(w.reset_at, now)})`) : null,
+        w.reset_at ? h('small', { className: 'ah-usage-reset' }, h('b', null, `Resets ${fmtClock(w.reset_at)}`), ` · in ${untilText(w.reset_at, now)}`) : null,
         w.detail ? h('small', null, w.detail) : null
       )
     ),
     (us.details || []).map((d, i) => h('small', { key: `d${i}` }, d)),
     h('hr'),
-    line('Log in', st.via === 'claude-code' ? 'Claude Code' : st.source_label || st.source || '—'),
-    st.expires_at_s ? line('Token expires', `${fmtClock(st.expires_at_s)} (${untilText(st.expires_at_s, now)})`) : null,
+    h('small', { className: 'ah-usage-sub' }, 'Login (not usage limits)'),
+    line('Signed in via', st.via === 'claude-code' ? 'Claude Code' : st.source_label || st.source || '—'),
+    st.expires_at_s ? line(st.has_refresh_token ? 'Login token renews' : 'Login token expires', `${fmtClock(st.expires_at_s)} (in ${untilText(st.expires_at_s, now)})`) : null,
     line('Token auto-refresh', st.has_refresh_token ? 'Yes' : st.source && /pool|chatgpt|codex/.test(String(st.source)) ? 'Managed by Hermes' : 'No'),
     st.last_refresh_s ? line('Last refreshed', relTime(st.last_refresh_s, now)) : null,
     line('Usage updated', p.updated_at ? relTime(p.updated_at, now) : '—'),
@@ -7189,7 +7234,10 @@ const CSS = `
   .ah-root .ah-rail{padding:8px 6px;align-items:stretch}
   .ah-root .ah-rail-head,.ah-root .ah-agent-body{display:none}
   .ah-root .ah-rail-section{height:1px;padding:0;margin:6px 12px;overflow:hidden;font-size:0;background:var(--ah-outline-variant)}
-  .ah-root .ah-agent{justify-content:center;min-height:56px;padding:8px 0;gap:0;border-radius:var(--ah-r-lg)}
+  .ah-root .ah-agent{position:relative;justify-content:center;min-height:56px;padding:8px 0;gap:0;border-radius:var(--ah-r-lg)}
+  /* running-commands badge: a count bubble on the avatar's corner, out of the flow so the face stays centered */
+  .ah-root .ah-agent .ah-agent-cmds{position:absolute;top:4px;right:4px;z-index:1;margin:0;min-width:18px;height:18px;padding:0 4px;justify-content:center;gap:0;font-size:10px;line-height:18px;background:var(--ah-primary);color:var(--ah-on-primary);box-shadow:0 0 0 2px var(--ah-surface)}
+  .ah-root .ah-agent .ah-agent-cmds .ah-icon{display:none}
   .ah-root .ah-search{width:min(220px,30cqw)}
 }
 @container (max-width:1099px){
@@ -7272,6 +7320,9 @@ const CSS = `
 .ah-root .ah-queue-hint{font-size:11px;color:var(--ah-on-surface-variant);padding-left:2px}
 .ah-root .ah-live-steer{display:flex;align-items:baseline;gap:6px;margin:4px 0 0;font-size:12px;color:var(--ah-on-surface-variant)}
 .ah-root .ah-live-steer b{color:var(--ah-primary);font-weight:600}
+.ah-root .ah-usage-left{display:inline-flex;align-items:center;gap:2px;font-variant-numeric:tabular-nums}
+.ah-root .ah-usage-reset b{font-weight:600;color:var(--ah-on-surface)}
+.ah-root .ah-usage-sub{font-size:11px;font-weight:600;opacity:.8}
 .ah-root .ah-usage{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-height:22px;padding:2px 4px 0;font-size:11.5px;line-height:16px;color:var(--ah-on-surface-variant)}
 .ah-root .ah-usage-muted{display:inline-flex;align-items:center;gap:4px;opacity:.8}
 .ah-root .ah-usage-chip{position:relative;display:inline-flex;align-items:center;gap:7px;height:22px;padding:0 8px;border:1px solid var(--ah-outline-variant);border-radius:999px;background:var(--ah-surface);color:var(--ah-on-surface-variant);font:inherit;cursor:default;outline:0}

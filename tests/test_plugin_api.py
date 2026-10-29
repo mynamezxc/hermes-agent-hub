@@ -686,6 +686,24 @@ class TeamSetupUsageTest(unittest.TestCase):
         self.m.usage("default", wait=5)  # cooling down after a failure: no new fetch
         self.assertEqual(len(calls), 4)
 
+    def test_usage_refetches_once_a_window_has_reset(self):
+        calls = []
+        past = time.time() - 5
+
+        def fake(agent, provider):
+            calls.append(provider)
+            reset = past if len(calls) <= 2 else time.time() + 3600
+            return {"status": {"logged_in": True}, "usage": {"windows": [{"label": "Session", "used_percent": 50, "reset_at": reset}]}}
+
+        self.m._fetch_usage_sync = fake
+        self.m.usage("default", wait=5)
+        self.assertEqual(len(calls), 2)
+        r = self.m.usage("default", wait=5)  # cached < TTL, but the reset time is behind us -> refetch
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all(p["usage"]["windows"][0]["reset_at"] > time.time() for p in r["providers"]))
+        self.m.usage("default", wait=5)  # fresh again: served from cache
+        self.assertEqual(len(calls), 4)
+
     def test_usage_answers_immediately_while_loading(self):
         import threading
         gate = threading.Event()
