@@ -1,77 +1,110 @@
-﻿<#
-  Agents Hub installer for Hermes Agent (Windows PowerShell 5.1+ / PowerShell 7).
+# Agents Hub installer for Hermes Agent (Windows PowerShell 5.1+ / PowerShell 7).
+#
+#   irm https://raw.githubusercontent.com/mynamezxc/hermes-agent-hub/main/install.ps1 | iex
+#
+# Options when run as a file:  .\install.ps1 [-Repo owner/repo|git-url|file:///path] [-Force] [-Restart]
+# Options when piped into iex: $env:AGENTS_HUB_REPO, $env:AGENTS_HUB_FORCE='1', $env:AGENTS_HUB_RESTART='1'
+#
+# Kept iex-safe on purpose: ASCII only, no BOM, no top-level param() block, and no 'exit'
+# (under iex 'exit' would close the user's PowerShell window).
 
-    irm https://raw.githubusercontent.com/mynamezxc/hermes-agent-hub/main/install.ps1 | iex
+function Install-AgentsHub {
+  param(
+    [string]$Repo = 'mynamezxc/hermes-agent-hub',
+    [switch]$Force,
+    [switch]$Restart
+  )
+  $ErrorActionPreference = 'Stop'
+  $Name = 'agents-hub'
+  $Bar = [string][char]0x2502   # the box-drawing column separator in 'hermes plugins list'
 
-  Options: -Repo <owner/repo | git url | file:///path>  -Force  -Restart
-  (or env vars AGENTS_HUB_REPO, AGENTS_HUB_FORCE=1, AGENTS_HUB_RESTART=1 when piped through iex)
-#>
-param(
-  [string]$Repo = $(if ($env:AGENTS_HUB_REPO) { $env:AGENTS_HUB_REPO } else { 'mynamezxc/hermes-agent-hub' }),
-  [switch]$Force = ($env:AGENTS_HUB_FORCE -eq '1'),
-  [switch]$Restart = ($env:AGENTS_HUB_RESTART -eq '1')
-)
-$ErrorActionPreference = 'Stop'
-$Name = 'agents-hub'
+  function Say($m) { Write-Host "==> $m" -ForegroundColor Cyan }
+  function Warn($m) { Write-Host "!! $m" -ForegroundColor Yellow }
+  function Fail($m) { Write-Host "xx $m" -ForegroundColor Red }
+  function Find-Row($text) {
+    $pattern = "[$Bar| ]$([regex]::Escape($Name))[ $Bar|]"
+    $text -split "`n" | Where-Object { $_ -match $pattern } | Select-Object -First 1
+  }
 
-function Say($m) { Write-Host "==> $m" -ForegroundColor Cyan }
-function Warn($m) { Write-Host "!! $m" -ForegroundColor Yellow }
-function Die($m) { Write-Host "xx $m" -ForegroundColor Red; exit 1 }
+  # 1. Hermes must already be installed.
+  $Hermes = $env:HERMES_BIN
+  if (-not $Hermes) {
+    $cmd = Get-Command hermes -ErrorAction SilentlyContinue
+    if ($cmd) { $Hermes = $cmd.Source }
+  }
+  if (-not $Hermes) {
+    foreach ($c in @("$env:LOCALAPPDATA\hermes\bin\hermes.exe", "$env:USERPROFILE\.hermes\bin\hermes.exe")) {
+      if (Test-Path $c) { $Hermes = $c; break }
+    }
+  }
+  if (-not $Hermes) {
+    Fail 'Hermes Agent was not found. Install it first: https://hermes-agent.nousresearch.com/docs (then re-run this script).'
+    return $false
+  }
 
-# 1. Hermes must already be installed.
-$Hermes = $env:HERMES_BIN
-if (-not $Hermes) {
-  $cmd = Get-Command hermes -ErrorAction SilentlyContinue
-  if ($cmd) { $Hermes = $cmd.Source }
+  $Version = (& $Hermes --version 2>$null | Select-Object -First 1)
+  if (-not $Version) {
+    Fail "'hermes --version' failed. Is the Hermes install healthy? Try 'hermes doctor'."
+    return $false
+  }
+  Say "Found $Version"
+
+  # 2. Install, or update an existing git install.
+  $Row = Find-Row ((& $Hermes plugins list 2>$null) -join "`n")
+
+  if (-not $Row) {
+    Say "Installing $Name from $Repo"
+    & $Hermes plugins install $Repo --enable --yes-deps
+    if ($LASTEXITCODE -ne 0) { Fail 'Install failed (see the output above).'; return $false }
+  } elseif ($Row -match 'git') {
+    Say "$Name is already installed from git: updating"
+    & $Hermes plugins update $Name
+    if ($LASTEXITCODE -ne 0) { Fail 'Update failed. Re-run with -Force (or $env:AGENTS_HUB_FORCE=''1'') to reinstall.'; return $false }
+    & $Hermes plugins enable $Name *> $null
+  } elseif ($Force) {
+    Say "Replacing the existing $Name with $Repo (-Force)"
+    & $Hermes plugins install $Repo --enable --yes-deps --force
+    if ($LASTEXITCODE -ne 0) { Fail 'Install failed (see the output above).'; return $false }
+  } else {
+    Warn "$Name is already installed but not from git (a local copy). Left untouched."
+    Warn "Re-run with -Force (or `$env:AGENTS_HUB_FORCE='1') to replace it with $Repo."
+    return $true
+  }
+
+  # 3. Verify.
+  $Ok = Find-Row ((& $Hermes plugins list 2>$null) -join "`n")
+  if (-not $Ok -or $Ok -notmatch 'enabled') {
+    Fail "$Name did not end up enabled. Check: hermes plugins list"
+    return $false
+  }
+  Say "$Name is installed and enabled"
+
+  # 4. Restart the gateway so the dashboard routes load.
+  if ($Restart) {
+    Say 'Restarting the Hermes gateway'
+    & $Hermes gateway restart
+    if ($LASTEXITCODE -ne 0) { Warn 'Gateway restart failed; restart it yourself (Desktop: Ctrl+K, Restart gateway).' }
+  } else {
+    Say 'Next: restart the gateway (Desktop: Ctrl+K, "Restart gateway"; CLI: hermes gateway restart).'
+  }
+  Say 'Then turn on the desktop half ONCE: Hermes Desktop > Settings > Plugins (or Capabilities > Plugins) > Agents Hub > Desktop on.'
+  Say '  (Desktop keeps a package''s desktop half off until you enable it; --enable only covers the agent half.)'
+  Say 'Open Agents Hub from the sidebar or press Ctrl+Alt+H. Not there? Ctrl+K > Reload desktop plugins.'
+  return $true
 }
-if (-not $Hermes) {
-  foreach ($c in @("$env:LOCALAPPDATA\hermes\bin\hermes.exe", "$env:USERPROFILE\.hermes\bin\hermes.exe")) {
-    if (Test-Path $c) { $Hermes = $c; break }
+
+# Options: script arguments when run as a file, environment variables when piped into iex.
+$AhOpts = @{}
+if ($env:AGENTS_HUB_REPO) { $AhOpts.Repo = $env:AGENTS_HUB_REPO }
+if ($env:AGENTS_HUB_FORCE -eq '1') { $AhOpts.Force = $true }
+if ($env:AGENTS_HUB_RESTART -eq '1') { $AhOpts.Restart = $true }
+$AhArgs = @($args)
+for ($i = 0; $i -lt $AhArgs.Count; $i++) {
+  switch -Regex ([string]$AhArgs[$i]) {
+    '^-Repo$' { $i++; if ($i -lt $AhArgs.Count) { $AhOpts.Repo = [string]$AhArgs[$i] } }
+    '^-Force$' { $AhOpts.Force = $true }
+    '^-Restart$' { $AhOpts.Restart = $true }
+    default { Write-Host "!! Unknown option: $($AhArgs[$i])" -ForegroundColor Yellow }
   }
 }
-if (-not $Hermes) { Die 'Hermes Agent was not found. Install it first: https://hermes-agent.nousresearch.com/docs (then re-run this script).' }
-
-$Version = (& $Hermes --version 2>$null | Select-Object -First 1)
-if (-not $Version) { Die "'hermes --version' failed. Is the Hermes install healthy? Try 'hermes doctor'." }
-Say "Found $Version"
-
-# 2. Install, or update an existing git install.
-$Listing = (& $Hermes plugins list 2>$null) -join "`n"
-$Row = ($Listing -split "`n" | Where-Object { $_ -match "[│| ]$([regex]::Escape($Name))[ │|]" } | Select-Object -First 1)
-
-if (-not $Row) {
-  Say "Installing $Name from $Repo"
-  & $Hermes plugins install $Repo --enable --yes-deps
-  if ($LASTEXITCODE -ne 0) { Die 'Install failed (see the output above).' }
-} elseif ($Row -match 'git') {
-  Say "$Name is already installed from git: updating"
-  & $Hermes plugins update $Name
-  if ($LASTEXITCODE -ne 0) { Die 'Update failed. Re-run with -Force to reinstall.' }
-  & $Hermes plugins enable $Name *> $null
-} elseif ($Force) {
-  Say "Replacing the existing $Name with $Repo (-Force)"
-  & $Hermes plugins install $Repo --enable --yes-deps --force
-  if ($LASTEXITCODE -ne 0) { Die 'Install failed (see the output above).' }
-} else {
-  Warn "$Name is already installed but not from git (a local copy). Left untouched."
-  Warn "Re-run with -Force to replace it with $Repo."
-  exit 0
-}
-
-# 3. Verify.
-$After = (& $Hermes plugins list 2>$null) -join "`n"
-$Ok = $After -split "`n" | Where-Object { $_ -match "[│| ]$([regex]::Escape($Name))[ │|]" -and $_ -match 'enabled' }
-if (-not $Ok) { Die "$Name did not end up enabled. Check: hermes plugins list" }
-Say "$Name is installed and enabled"
-
-# 4. Restart the gateway so the dashboard routes load.
-if ($Restart) {
-  Say 'Restarting the Hermes gateway'
-  & $Hermes gateway restart
-  if ($LASTEXITCODE -ne 0) { Warn 'Gateway restart failed; restart it yourself (Desktop: Ctrl+K, Restart gateway).' }
-} else {
-  Say 'Next: restart the gateway (Desktop: Ctrl+K, "Restart gateway"; CLI: hermes gateway restart).'
-}
-Say 'Then turn on the desktop half ONCE: Hermes Desktop > Settings > Plugins (or Capabilities > Plugins) > Agents Hub > Desktop on.'
-Say '  (Desktop keeps a package''s desktop half off until you enable it; -enable only covers the agent half.)'
-Say 'Open Agents Hub from the sidebar or press Ctrl+Alt+H. Not there? Ctrl+K > Reload desktop plugins.'
+$null = Install-AgentsHub @AhOpts

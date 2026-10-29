@@ -764,6 +764,24 @@ class TeamSetupUsageTest(unittest.TestCase):
         self.assertIn("agents-hub:team-coordination", names)
 
 
+
+class InstallerScriptTest(unittest.TestCase):
+    """install.ps1 must survive `irm ... | iex`: no BOM (it hides the first token), ASCII only,
+    no top-level param() block, and no `exit` (under iex it would close the user's PowerShell)."""
+
+    PS1 = API.parent.parent / "install.ps1"
+
+    @unittest.skipUnless((API.parent.parent / "install.ps1").exists(), "installer ships in the repo only")
+    def test_install_ps1_is_iex_safe(self):
+        import re
+        raw = self.PS1.read_bytes()
+        self.assertFalse(raw.startswith(b"\xef\xbb\xbf"), "UTF-8 BOM breaks irm | iex")
+        raw.decode("ascii")  # raises on any non-ASCII byte
+        code = [l for l in raw.decode("ascii").splitlines() if l.strip() and not l.lstrip().startswith("#")]
+        self.assertFalse(code[0].lstrip().lower().startswith("param("), "top-level param() is not iex-safe")
+        self.assertFalse(any(re.search(r"(^|[;{\s])exit(\s|$|;)", l) for l in code), "exit would close the user's shell")
+        self.assertNotIn("<#", raw.decode("ascii"))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
