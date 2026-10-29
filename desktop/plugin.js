@@ -1117,47 +1117,7 @@ async function rewindTo(agent, m, text, paths) {
 
 /* ── permission requests ── */
 
-const ALLOW_KEY = 'agents-hub.allowUntil'
-const ALLOW_MINUTES = 30
-
-const store = () => (typeof window !== 'undefined' && window.localStorage) || null
-
-function allowMap() {
-  try {
-    const ls = store()
-    const m = JSON.parse((ls && ls.getItem(ALLOW_KEY)) || '{}')
-
-    return m && typeof m === 'object' ? m : {}
-  } catch {
-    return {}
-  }
-}
-
-function allowUntil(agent) {
-  return num(allowMap()[agent])
-}
-
-function setAllowUntil(agent, ts) {
-  const m = allowMap()
-
-  if (ts > Date.now()) {
-    m[agent] = ts
-  } else {
-    delete m[agent]
-  }
-
-  try {
-    const ls = store()
-
-    if (ls) {
-      ls.setItem(ALLOW_KEY, JSON.stringify(m))
-    }
-  } catch {
-    /* storage unavailable: the grant lasts for this page only */
-  }
-
-  emit()
-}
+// Every answer is the owner's click; the plugin never answers a request on its own (catalog rule 12).
 
 function approvalOf(p) {
   return {
@@ -1174,10 +1134,6 @@ function onApprovalRequest(agent, p) {
 
   S.approvals = { ...S.approvals, [agent]: [...rest, req] }
   emit()
-
-  if (allowUntil(agent) > Date.now()) {
-    void answerApproval(agent, req, 'once').catch(() => {})
-  }
 }
 
 function dropApproval(agent, id) {
@@ -1190,7 +1146,7 @@ function dropApproval(agent, id) {
   }
 }
 
-// choice: once | session (remember for this chat/goal) | always | deny; "30m" = once + auto-allow for 30 minutes.
+// choice: once | session (Hermes remembers it for this chat/goal) | always (Hermes's permanent allow) | deny.
 async function answerApproval(agent, req, choice) {
   const lv = liveOf(agent)
 
@@ -1198,15 +1154,11 @@ async function answerApproval(agent, req, choice) {
     throw new Error('The agent’s session is not ready yet; try again in a moment.')
   }
 
-  if (choice === '30m') {
-    setAllowUntil(agent, Date.now() + ALLOW_MINUTES * 60 * 1000)
-  }
-
-  await rp(agent, 'approval.respond', { session_id: lv.runtime, choice: choice === '30m' ? 'once' : choice, ...(req.request_id ? { request_id: req.request_id } : {}) })
+  await rp(agent, 'approval.respond', { session_id: lv.runtime, choice, ...(req.request_id ? { request_id: req.request_id } : {}) })
   dropApproval(agent, req.request_id)
 }
 
-// Pending requests survive reloads on the gateway side: re-read them (and honour an active 30-minute grant).
+// Pending requests survive reloads on the gateway side: re-read them.
 async function syncApprovals(agent) {
   const lv = liveOf(agent)
 
@@ -1222,12 +1174,6 @@ async function syncApprovals(agent) {
     if (list.length !== prev.length || list.some((x, i) => x.request_id !== (prev[i] || {}).request_id)) {
       S.approvals = { ...S.approvals, [agent]: list }
       emit()
-    }
-
-    if (list.length && allowUntil(agent) > Date.now()) {
-      for (const q of list) {
-        void answerApproval(agent, q, 'once').catch(() => {})
-      }
     }
   } catch {
     /* older gateway without approval.pending */
@@ -1818,11 +1764,8 @@ function QueueTray({ s, agent, running }) {
 
 function Approvals({ s, agent }) {
   const list = s.approvals[agent] || []
-  const until = allowUntil(agent)
   const [busy, setBusy] = useState('')
   const [err, setErr] = useState(null)
-
-  useTicker(until > Date.now())
 
   const answer = async (req, choice) => {
     setBusy(`${req.request_id}:${choice}`)
@@ -1837,24 +1780,13 @@ function Approvals({ s, agent }) {
     }
   }
 
-  if (list.length === 0 && until <= Date.now()) {
+  if (list.length === 0) {
     return null
   }
-
-  const clock = ts => new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 
   return h(
     'div',
     { className: 'ah-approvals' },
-    until > Date.now()
-      ? h(
-          'p',
-          { className: 'ah-allow-chip', role: 'status' },
-          h(Icon, { name: 'shield', size: 12 }),
-          `Auto-allowing commands from ${agentName(s, agent)} until ${clock(until)}`,
-          h('button', { type: 'button', className: 'ah-link ah-state', onClick: () => setAllowUntil(agent, 0) }, 'Stop')
-        )
-      : null,
     list.map(req =>
       h(
         'section',
@@ -1867,7 +1799,7 @@ function Approvals({ s, agent }) {
           { className: 'ah-approval-acts' },
           h('button', { type: 'button', className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', disabled: !!busy, onClick: () => void answer(req, 'once') }, h(Icon, { name: 'check', size: 14 }), 'Allow'),
           h('button', { type: 'button', className: 'ah-btn ah-btn-outlined ah-btn-sm ah-state', disabled: !!busy, title: 'Hermes remembers this for the current chat session (the goal in progress)', onClick: () => void answer(req, 'session') }, h(Icon, { name: 'target', size: 14 }), 'Always allow in this goal'),
-          h('button', { type: 'button', className: 'ah-btn ah-btn-outlined ah-btn-sm ah-state', disabled: !!busy, title: `Auto-allow every request from this agent for the next ${ALLOW_MINUTES} minutes (while Agents Hub is open)`, onClick: () => void answer(req, '30m') }, h(Icon, { name: 'watch', size: 14 }), `Allow ${ALLOW_MINUTES} min`),
+          h('button', { type: 'button', className: 'ah-btn ah-btn-outlined ah-btn-sm ah-state', disabled: !!busy, title: 'Hermes always allows this kind of command from now on (its permanent allowlist)', onClick: () => void answer(req, 'always') }, h(Icon, { name: 'pass', size: 14 }), 'Always allow'),
           h('span', { className: 'ah-spacer' }),
           h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state ah-btn-danger', disabled: !!busy, onClick: () => void answer(req, 'deny') }, h(Icon, { name: 'close', size: 14 }), 'Deny')
         )

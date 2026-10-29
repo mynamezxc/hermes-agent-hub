@@ -1,7 +1,7 @@
 ---
 name: team-coordination
 description: "Use when work needs more than one agent in an Agents Hub team: read TEAM.md, pick members by role, hand off, follow up, review."
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Coordinating work across the agent team
@@ -24,25 +24,30 @@ Use this only when the work really needs someone else. If doing it yourself is f
 
 ## 3. Hand work off
 
-Write the brief to a file (`<work folder>/<id>-<task>.prompt.md`): goal, scope (files or folders it may touch),
-constraints (no spending, publishing, deleting data or reading secrets), acceptance criteria, deadline, and ask for a
-**single JSON line** summarizing the result at the end.
+Hand work to another member through Hermes's **Kanban board**, the supported way for profiles to collaborate:
+Hermes's dispatcher starts the assignee as a full worker under its own profile, its permission rules and approvals.
 
-Send it (in the background if it is long):
+Create one card per piece with the `kanban_create` tool (if the tool is missing, ask the owner to enable the `kanban`
+toolset for you):
 
-```
-hermes -p <id> chat -Q --oneshot --source tool --query-file <prompt.md>
-```
+- `assignee`: the member's id from `TEAM.md`.
+- `title`: the outcome, short.
+- `body`: goal, scope (files or folders it may touch), constraints (no spending, publishing, deleting data or reading
+  secrets), acceptance criteria, deadline, and "finish with `kanban_complete` and a one-paragraph summary".
+- `parents`: cards that must finish first, when the pieces depend on each other.
 
-The Hub shows this as a conversation between the two agents, and the receiver shows "Working in another session".
-For a small sub-task that needs no separate role, use `delegate_task` (a sub-agent) instead.
+Never start another agent yourself with `hermes ... chat --oneshot` or a similar non-interactive command: that runs
+it without approvals. For a small sub-task that needs no separate role, use `delegate_task` (a sub-agent) instead.
+
+The Hub shows the cards on its **Tasks** tab and the worker's session as "Working in another session" in that
+member's chat.
 
 ## 4. Follow up and accept
 
 - Track each hand-off as one of your goals, e.g. "Dev Backend ships the login API (tested)". Mark it `done` only after
   you have received and checked the result.
-- Read the final JSON line and check the real output (files, tests, logs). Do not trust self-reports.
-- Not good enough: send it back with specific fixes. Still failing after two rounds: tell the owner.
+- Read the card's completion summary and comments, then check the real output (files, tests, logs). Do not trust self-reports.
+- Not good enough: comment on the card with specific fixes (or create a follow-up card). Still failing after two rounds: tell the owner.
 
 ## 5. Report to the owner
 

@@ -2208,8 +2208,8 @@ def _write_team_md(team: dict[str, dict[str, Any]]) -> None:
         cap = " ".join(str(e.get("capabilities") or "").split())
         lines.append(f"| `{agent}` | {e.get('name') or agent} | {e.get('role') or ''} | {e.get('reports_to') or ''} | "
                      f"{model or ''}{' (' + provider + ')' if provider else ''} | {_clip(cap, 240)} |")
-    lines += ["", "Ask a member: `hermes -p <id> chat -Q --oneshot --source tool --query-file <prompt.md>` "
-                  "(the Hub shows it as a conversation between the two agents).", ""]
+    lines += ["", "Hand work to a member with the `kanban_create` tool (`assignee` = the id above); Hermes's dispatcher runs it",
+              "as that profile, with its own approvals. Never start another agent with a non-interactive `--oneshot` command.", ""]
     p = _hub_dir("") / "TEAM.md"
     text = "\n".join(lines)
     if not p.is_file() or p.read_text(encoding="utf-8") != text:

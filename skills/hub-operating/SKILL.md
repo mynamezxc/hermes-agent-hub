@@ -1,7 +1,7 @@
 ---
 name: hub-operating
 description: "Use when a message arrives through Agents Hub (it carries a <hub-goals> block). How goals, file edits, permissions and chat work in the Hub."
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Working in Agents Hub
@@ -40,8 +40,8 @@ The `<hub-goals>` block lists your open goals (`g1`, `g2`… and which one is cu
 
 ## 3. Commands that need permission
 
-Risky commands show a permission card in the Hub. The owner picks: allow once, always allow in this goal, allow for
-30 minutes, or deny. When denied, do not look for a workaround: say what you need and why, then wait.
+Risky commands show a permission card in the Hub. The owner picks: allow once, always allow in this goal, always
+allow, or deny. The Hub never answers for the owner. When denied, do not look for a workaround: say what you need and why, then wait.
 Run long commands in the background (`terminal(background=true)`); the Hub lists them under "Running commands".
 
 While you work, the owner may **steer** you: extra instructions arrive inside a tool result mid-turn. Treat them as
