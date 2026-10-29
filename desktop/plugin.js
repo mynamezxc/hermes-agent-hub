@@ -467,6 +467,59 @@ function load() {
   return inflight
 }
 
+// OS notification click -> the Hub, not the core chat view. Core's own listener opens the session in the
+// Sessions view first; when that session is one of the Hub's agent chats we bring the owner back to the Hub
+// with that agent's chat open (a few hops so it lands after core's navigation settles).
+function agentForSession(id) {
+  if (!S || !id) {
+    return null
+  }
+
+  for (const [agent, lv] of Object.entries(S.live || {})) {
+    if (lv && (lv.runtime === id || lv.stored === id)) {
+      return agent
+    }
+  }
+
+  for (const [agent, c] of Object.entries(S.chat || {})) {
+    if (c && c.data && c.data.session_id === id) {
+      return agent
+    }
+  }
+
+  return null
+}
+
+const onHubPath = () => {
+  try {
+    return String(window.location.hash || window.location.pathname || '').replace(/^#/, '').split('?')[0] === HUB_PATH
+  } catch {
+    return false
+  }
+}
+
+function focusHubChat(sessionId, navigate) {
+  const agent = agentForSession(sessionId)
+
+  if (!agent) {
+    return false
+  }
+
+  const go = () => {
+    if (!onHubPath()) {
+      navigate(HUB_PATH)
+    }
+
+    setUi({ agent, tab: 'chat', side: true, sideFile: null, handoff: null })
+  }
+
+  for (const ms of [0, 150, 450]) {
+    setTimeout(go, ms)
+  }
+
+  return true
+}
+
 function setUi(patch) {
   const next = { ...patch }
 
@@ -7669,6 +7722,18 @@ export default {
       }
     } catch {
       /* older desktop: the replay poll alone drives the live view */
+    }
+
+    // Notification clicks for the Hub's agent chats come back to the Hub.
+    try {
+      const desk = typeof window !== 'undefined' ? window.hermesDesktop : null
+      const offFocus = desk && typeof desk.onFocusSession === 'function' ? desk.onFocusSession(id => focusHubChat(id, host.navigate)) : null
+
+      if (typeof offFocus === 'function') {
+        ctx.onDispose(offFocus)
+      }
+    } catch {
+      /* no desktop bridge (web dashboard): nothing to route */
     }
 
     const open = () => host.navigate(HUB_PATH)
