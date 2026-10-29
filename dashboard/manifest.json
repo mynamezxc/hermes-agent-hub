@@ -1,0 +1,11 @@
+{
+  "name": "agents-hub",
+  "label": "Agents Hub",
+  "description": "Backend for the Agents Hub desktop page: agents, chat timelines, goals, running commands, permission requests, schedules, tasks and git changes.",
+  "icon": "Users",
+  "version": "1.3.0",
+  "tab": {
+    "hidden": true
+  },
+  "api": "plugin_api.py"
+}
