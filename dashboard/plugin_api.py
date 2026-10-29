@@ -13,6 +13,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import asyncio
+import difflib
 import json
 import os
 import re
@@ -1102,6 +1103,48 @@ def _check_agent(agent: str) -> None:
         raise HTTPException(404, "unknown agent")
 
 
+MAX_PICKER_SESSIONS = 20
+
+
+def _conversation_groups(agent: str, scan: int = 300) -> list[dict[str, Any]]:
+    """The agent's own conversations (one per compression lineage), newest activity first.
+
+    Agent-to-agent sessions (handoffs) and scheduled-job runs are left out: they are not conversations
+    the owner switches between. ``latest_id`` is the newest session of the lineage (where to resume).
+    """
+    db = _state_db(agent)
+    rows = query(db, "SELECT * FROM sessions ORDER BY COALESCE(last_activity_at, started_at, 0) DESC, started_at DESC LIMIT ?",
+                 (scan,))
+    owners: dict[str, Optional[str]] = {}
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        root = _lineage_root(agent, row)
+        rid = root["id"]
+        g = groups.get(rid)
+        if g is None:
+            if str(root.get("source") or "").lower() == "cron" or _session_conv(agent, root, owners) is not None:
+                groups[rid] = {"skip": True}
+                continue
+            last = _num(row.get("last_activity_at")) or _num(row.get("started_at"))
+            groups[rid] = g = {"id": rid, "latest_id": row["id"], "title": _conv_title(db, root),
+                               "source": str(root.get("source") or ""), "bot_chat": root.get("title") == BOT_CHAT_TITLE,
+                               "started_at": _num(root.get("started_at")), "last_at": last, "message_count": 0}
+        if g.get("skip"):
+            continue
+        g["message_count"] += int(row.get("message_count") or 0)
+    out = [g for g in groups.values() if not g.get("skip") and g["message_count"] > 0]
+    out.sort(key=lambda g: g["last_at"] or 0, reverse=True)
+    return out
+
+
+@router.get("/agents/{agent}/sessions")
+def agent_sessions(agent: str) -> dict[str, Any]:
+    """Conversations the owner can switch between in the Hub chat (e.g. a Facebook-triggered one and
+    the Desktop one)."""
+    _check_agent(agent)
+    return {"agent": agent, "sessions": _conversation_groups(agent)[:MAX_PICKER_SESSIONS]}
+
+
 @router.get("/agents/{agent}/chat")
 def agent_chat(agent: str) -> dict[str, Any]:
     """The profile's canonical one-chat session (title exactly ``Bot Chat``)."""
@@ -1153,26 +1196,38 @@ def _handoff_items(agent: str, before: Optional[float]) -> list[dict[str, Any]]:
 
 @router.get("/agents/{agent}/timeline")
 def agent_timeline(agent: str, before: Optional[float] = Query(None),
-                   limit: int = Query(150, ge=1, le=500)) -> dict[str, Any]:
-    """Merged chronological chat timeline for one agent (oldest→newest within the page)."""
+                   limit: int = Query(150, ge=1, le=500), session: str = Query("")) -> dict[str, Any]:
+    """Merged chronological chat timeline for one agent (oldest→newest within the page).
+
+    ``session`` (a conversation's root id, from /sessions) narrows it to that one conversation and its
+    compression continuations."""
     _check_agent(agent)
     db = _state_db(agent)
     if not isinstance(before, (int, float)):
         before = None
+    if not isinstance(session, str):
+        session = ""
     where = " WHERE started_at < ?" if before is not None else ""
     params: tuple = (before,) if before is not None else ()
-    # Order by last activity, not start time: a long-lived Bot Chat started weeks ago must stay on the first
-    # page even after 60+ newer short sessions (cron/tool/subagent); ordering by started_at dropped it, so the
-    # owner's chat history vanished from the Hub after every refresh.
-    sessions = query(db, f"SELECT * FROM sessions{where} "
-                         f"ORDER BY COALESCE(last_activity_at, ended_at, started_at, 0) DESC, started_at DESC LIMIT ?",
-                     (*params, MAX_TIMELINE_SESSIONS + 1))
-    more_sessions = len(sessions) > MAX_TIMELINE_SESSIONS
+    if session:
+        lineage = _chat_lineage(agent, session)
+        if not lineage or lineage[0]["id"] != session:
+            raise HTTPException(404, "unknown session")
+        sessions = sorted(lineage, key=lambda r: _num(r.get("started_at")) or 0, reverse=True)
+        more_sessions = False
+    else:
+        # Order by last activity, not start time: a long-lived Bot Chat started weeks ago must stay on the first
+        # page even after 60+ newer short sessions (cron/tool/subagent); ordering by started_at dropped it, so the
+        # owner's chat history vanished from the Hub after every refresh.
+        sessions = query(db, f"SELECT * FROM sessions{where} "
+                             f"ORDER BY COALESCE(last_activity_at, ended_at, started_at, 0) DESC, started_at DESC LIMIT ?",
+                         (*params, MAX_TIMELINE_SESSIONS + 1))
+        more_sessions = len(sessions) > MAX_TIMELINE_SESSIONS
     sessions = sessions[:MAX_TIMELINE_SESSIONS]
     # Always merge the Hub's own chat (canonical Bot Chat) with the other sessions of this profile
     # (Messenger/tool triggers, desktop chats, cron): it must never fall out of the session window,
     # or the owner's reply vanishes from the Hub right after the turn ends.
-    chat_id = agent_chat(agent).get("session_id")
+    chat_id = None if session else agent_chat(agent).get("session_id")
     if chat_id and all(r["id"] != chat_id for r in sessions):
         sessions += query(db, "SELECT * FROM sessions WHERE id = ?" + (" AND started_at < ?" if before is not None else ""),
                           (chat_id, *params))
@@ -1197,7 +1252,8 @@ def agent_timeline(agent: str, before: Optional[float] = Query(None),
                 m["auto"] = "Scheduled job"
                 m["auto_summary"] = redact(_clip(" ".join(m["content"].split()), 200))
             items.append({"type": "message", "session_id": sid, **m, "_t": m["timestamp"] or 0.0, "_o": 1})
-    items.extend({**h, "_t": h["at"] or 0.0, "_o": 0} for h in _handoff_items(agent, before))
+    if not session:  # a picked conversation shows only its own messages
+        items.extend({**h, "_t": h["at"] or 0.0, "_o": 0} for h in _handoff_items(agent, before))
     items.sort(key=lambda i: (i["_t"], i["_o"]))
     has_more = more_sessions or len(items) > limit
     page = items[-limit:]
@@ -1814,18 +1870,24 @@ def _write_json(path: Path, data: Any) -> None:
 # tags are stripped from what the chat shows.
 
 GOAL_UPDATE_RE = re.compile(r"<hub-goals-update>\s*(.*?)\s*</hub-goals-update>", re.S)
+TOOLS_UPDATE_RE = re.compile(r"<hub-tools-update>\s*(.*?)\s*</hub-tools-update>", re.S)
+HUB_REPLY_TAGS_RE = re.compile(r"<hub-(goals|tools)-update>.*?</hub-\1-update>", re.S)
 GOAL_CTX_RE = re.compile(r"\s*<hub-goals>.*?</hub-goals>\s*", re.S)
 MAX_GOALS = 100
 MAX_GOAL_HISTORY = 400
 GOAL_TITLE_CHARS = 240
+# Guards against goal clutter (an agent filing every chat as a goal and leaving it open):
+MAX_AGENT_ACTIVE_GOALS = 6   # an agent may not add past this many open goals; the owner may
+GOAL_STALE_DAYS = 7          # an open goal untouched this long is flagged (Hub + agent block) to close
+GOAL_SIMILAR = 0.85          # a new title this close to an open one is the same goal
 
 
 def strip_goal_tags(role: str, content: str) -> str:
-    if not content or "<hub-goals" not in content:
+    if not content or "<hub-" not in content:
         return content
     if role == "user":
         return GOAL_CTX_RE.sub("\n", content).strip()
-    return GOAL_UPDATE_RE.sub("", content).strip()
+    return HUB_REPLY_TAGS_RE.sub("", content).strip()
 
 
 def _goal_state(agent: str) -> dict[str, Any]:
@@ -1863,12 +1925,24 @@ def apply_goal_update(st: dict[str, Any], upd: dict[str, Any], by: str, at: Opti
     at = at or time.time()
     n = 0
     adds = upd.get("add") or []
-    for item in adds if isinstance(adds, list) else [adds]:
+    adds = adds if isinstance(adds, list) else [adds]
+    if by == "agent":
+        adds = adds[:1]  # one new goal per reply at most
+    for item in adds:
         title = _goal_title(item.get("title") if isinstance(item, dict) else item)
         if not title or len([g for g in st["goals"] if g["status"] == "active"]) >= MAX_GOALS:
             continue
-        if any(g["status"] == "active" and g["title"].lower() == title.lower() for g in st["goals"]):
+        open_goals = [g for g in st["goals"] if g["status"] == "active"]
+        if any(g["title"].lower() == title.lower() for g in open_goals):
             continue  # the agent re-announcing an existing goal
+        if by == "agent":
+            if len(title.strip(" .…")) < 4 or len(open_goals) >= MAX_AGENT_ACTIVE_GOALS:
+                continue  # placeholder title copied from the template, or too many open goals already
+            if isinstance(item, dict) and str(item.get("status") or "") in ("done", "dropped"):
+                continue  # finished within the same reply: that was a task, not a goal
+            if any(difflib.SequenceMatcher(None, g["title"].lower(), title.lower()).ratio() >= GOAL_SIMILAR
+                   for g in open_goals):
+                continue  # a rewording of an open goal
         st["seq"] += 1
         g = {"id": f"g{st['seq']}", "title": title, "status": "active", "by": by, "created_at": at,
              "updated_at": at, "done_at": None}
@@ -1910,17 +1984,19 @@ def apply_goal_update(st: dict[str, Any], upd: dict[str, Any], by: str, at: Opti
     return n
 
 
+def _tag_rows(agent: str, tag: str, after_id: int) -> list[dict[str, Any]]:
+    """Assistant replies newer than ``after_id`` that carry ``<tag>``, in any of the agent's sessions
+    (Bot Chat or a conversation picked in the Hub). Rewound replies are skipped."""
+    db = _state_db(agent)
+    _sel, clause = _msg_select(db)
+    return query(db, f"SELECT id, content, timestamp FROM messages WHERE role = 'assistant' "
+                     f"AND id > ? AND content LIKE ?{clause} ORDER BY id", (int(after_id or 0), f"%<{tag}>%"))
+
+
 def sync_goals(agent: str) -> dict[str, Any]:
     """Apply goal tags from the agent's chat replies not applied yet (rewound replies are inactive)."""
     st = _goal_state(agent)
-    ids = [s["id"] for s in _chat_lineage(agent, None)]
-    if not ids:
-        return st
-    db = _state_db(agent)
-    _sel, clause = _msg_select(db)
-    ph = ",".join("?" * len(ids))
-    rows = query(db, f"SELECT id, content, timestamp FROM messages WHERE session_id IN ({ph}) AND role = 'assistant' "
-                     f"AND id > ? AND content LIKE '%<hub-goals-update>%'{clause} ORDER BY id", (*ids, st["applied_id"]))
+    rows = _tag_rows(agent, "hub-goals-update", st["applied_id"])
     if not rows:
         return st
     for r in rows:
@@ -1936,9 +2012,19 @@ def sync_goals(agent: str) -> dict[str, Any]:
     return st
 
 
+def _goal_idle_days(g: dict[str, Any], now: Optional[float] = None) -> int:
+    if g.get("status") != "active":
+        return 0
+    last = _num(g.get("updated_at")) or _num(g.get("created_at")) or 0
+    return int(max(0.0, (now or time.time()) - last) // 86400) if last else 0
+
+
 def _goals_public(agent: str, st: dict[str, Any]) -> dict[str, Any]:
     order = {"active": 0, "done": 1, "dropped": 2}
-    goals = sorted(st["goals"], key=lambda g: (g["id"] != st.get("current"), order.get(g["status"], 3), -(g["updated_at"] or 0)))
+    now = time.time()
+    goals = [{**g, "idle_days": _goal_idle_days(g, now), "stale": _goal_idle_days(g, now) >= GOAL_STALE_DAYS}
+             for g in st["goals"]]
+    goals = sorted(goals, key=lambda g: (g["id"] != st.get("current"), order.get(g["status"], 3), -(g["updated_at"] or 0)))
     return {"agent": agent, "current": st.get("current"), "goals": goals, "history": st["history"][-60:][::-1]}
 
 
@@ -1970,6 +2056,125 @@ def edit_goals(agent: str, body: dict[str, Any]) -> dict[str, Any]:
     apply_goal_update(st, upd, "owner")
     _write_json(_hub_dir("goals") / f"{agent}.json", st)
     return _goals_public(agent, st)
+
+
+# ─────────────────────── saved tools ───────────────────────
+# Tools and apps an agent built that the owner wants to reopen by name ("open the invoice dashboard").
+# The agent adds one with a reply tag, the owner can remove it in the side panel:
+#   <hub-tools-update>{"add":[{"name":"…","open":"<url or absolute path or command>","note":"…"}],
+#                      "remove":["t1"]}</hub-tools-update>
+
+MAX_TOOLS = 30
+MAX_AGENT_TOOL_ADDS = 2
+TOOL_NAME_CHARS = 80
+TOOL_TARGET_CHARS = 600
+TOOL_NOTE_CHARS = 200
+_WIN_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
+def _tools_state(agent: str) -> dict[str, Any]:
+    st = _read_json(_hub_dir("tools") / f"{agent}.json", {})
+    st.setdefault("tools", [])
+    st.setdefault("seq", 0)
+    st.setdefault("applied_id", 0)
+    return st
+
+
+def _tool_kind(target: str) -> str:
+    if re.match(r"^https?://", target, re.I):
+        return "url"
+    if _WIN_PATH.match(target) or target.startswith(("/", "~/")) or re.match(r"^file://", target, re.I):
+        return "path"
+    return "command"
+
+
+def _tool_text(v: Any, n: int) -> str:
+    return redact(_clip(" ".join(str(v or "").split()), n))
+
+
+def apply_tools_update(st: dict[str, Any], upd: dict[str, Any], by: str, at: Optional[float] = None) -> int:
+    at = at or time.time()
+    n = 0
+    adds = upd.get("add") or []
+    adds = adds if isinstance(adds, list) else [adds]
+    added = 0
+    for item in adds:
+        if not isinstance(item, dict) or (by == "agent" and added >= MAX_AGENT_TOOL_ADDS):
+            continue
+        name = _tool_text(item.get("name"), TOOL_NAME_CHARS)
+        target = str(item.get("open") or item.get("target") or "").strip()
+        if "\n" in target or len(target) > TOOL_TARGET_CHARS:
+            continue
+        target = redact(target)
+        if len(name.strip(" .…")) < 2 or len(target.strip(" .…<>")) < 3:
+            continue  # placeholder copied from the template
+        note = _tool_text(item.get("note"), TOOL_NOTE_CHARS)
+        same = next((t for t in st["tools"] if t["name"].lower() == name.lower() or t["target"] == target), None)
+        if same:  # re-adding updates the entry instead of duplicating it
+            if (same["name"], same["target"], same["note"]) != (name, target, note or same["note"]):
+                same.update(name=name, target=target, kind=_tool_kind(target), note=note or same["note"], updated_at=at)
+                n += 1
+            continue
+        if len(st["tools"]) >= MAX_TOOLS:
+            continue
+        st["seq"] += 1
+        st["tools"].append({"id": f"t{st['seq']}", "name": name, "target": target, "kind": _tool_kind(target),
+                            "note": note, "by": by, "added_at": at, "updated_at": at})
+        n += 1
+        added += 1
+    removes = upd.get("remove") or []
+    for key in removes if isinstance(removes, list) else [removes]:
+        k = str(key or "").lower()
+        t = next((t for t in st["tools"] if t["id"] == str(key) or t["name"].lower() == k), None)
+        if t:
+            st["tools"].remove(t)
+            n += 1
+    return n
+
+
+def sync_tools(agent: str) -> dict[str, Any]:
+    st = _tools_state(agent)
+    rows = _tag_rows(agent, "hub-tools-update", st["applied_id"])
+    if not rows:
+        return st
+    for r in rows:
+        for raw in TOOLS_UPDATE_RE.findall(decode_content(r.get("content")) or ""):
+            try:
+                upd = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(upd, dict):
+                apply_tools_update(st, upd, "agent", _num(r.get("timestamp")))
+        st["applied_id"] = max(st["applied_id"], int(r["id"]))
+    _write_json(_hub_dir("tools") / f"{agent}.json", st)
+    return st
+
+
+@router.get("/agents/{agent}/tools")
+def agent_tools(agent: str) -> dict[str, Any]:
+    _check_agent(agent)
+    st = sync_tools(agent)
+    return {"agent": agent, "tools": sorted(st["tools"], key=lambda t: -(t.get("updated_at") or 0))}
+
+
+@router.post("/agents/{agent}/tools")
+def edit_tools(agent: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Owner actions: {"action": "remove", "id"} or {"action": "add", "name", "open", "note"?}."""
+    _check_agent(agent)
+    st = sync_tools(agent)
+    action = str(body.get("action") or "")
+    if action == "remove":
+        if not any(t["id"] == str(body.get("id")) for t in st["tools"]):
+            raise HTTPException(404, "tool not found")
+        apply_tools_update(st, {"remove": [str(body.get("id"))]}, "owner")
+    elif action == "add":
+        if not apply_tools_update(st, {"add": [{"name": body.get("name"), "open": body.get("open"),
+                                                 "note": body.get("note")}]}, "owner"):
+            raise HTTPException(400, "name and a URL, path or command are required")
+    else:
+        raise HTTPException(400, "unknown action")
+    _write_json(_hub_dir("tools") / f"{agent}.json", st)
+    return agent_tools(agent)
 
 
 @router.get("/goals/history")

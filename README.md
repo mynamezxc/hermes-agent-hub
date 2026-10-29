@@ -11,7 +11,7 @@ running commands · scheduled jobs · team roster · Claude & Codex usage at a g
 
 <p>
   <a href="https://github.com/mynamezxc/hermes-agent-hub/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/mynamezxc/hermes-agent-hub?style=flat-square&logo=github&color=5B6CE0"></a>
-  <a href="https://github.com/mynamezxc/hermes-agent-hub/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.6.10-5B6CE0?style=flat-square"></a>
+  <a href="https://github.com/mynamezxc/hermes-agent-hub/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.6.11-5B6CE0?style=flat-square"></a>
   <a href="https://github.com/NousResearch/hermes-agent"><img alt="Hermes Agent plugin" src="https://img.shields.io/badge/Hermes%20Agent-plugin-0E9F8E?style=flat-square"></a>
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-3B8FD9?style=flat-square">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-D9822B?style=flat-square"></a>
@@ -152,7 +152,10 @@ And also:
 - 💬 **Full chat**: paste or drop images and files, slash commands, per-session model and reasoning picker, an input that
   grows to 15 lines, older messages load as you scroll up, edit an earlier message and rerun from there.
 - 🪜 **Live turns as steps**: "Step N · Working: …" with that step's tools; finished runs fold into one line.
-- 🎯 **Goals**: several per agent, one current. Agents add, update and complete them themselves; you can edit too.
+- 🎯 **Goals**: several per agent, one current. Agents add, update and complete them themselves; you can edit too. Agents only file real outcomes (not every chat), and idle goals are flagged.
+- 💬 **Conversation switcher**: an agent with several sessions (say one fed by a Facebook trigger and one in Hermes) gets a one-click switcher above the chat; the pick is remembered.
+- 🧰 **Saved tools**: apps and dashboards an agent built, listed under Running commands so you can say "open X". The agent adds only substantial tools; you can remove them.
+- 📝 **Markdown preview** for `.md` files in the side panel.
 - 📝 **Changed files**: per-session diffs, approve all or per file, restore files when you roll back a message.
 - 🔐 **Permission requests** inline: allow once, always allow in this goal, always allow, or deny. Every answer is your click; the Hub never approves on its own.
 - 🖥️ **Running commands** of every agent: visible vs. background, click to see the command or its live output.

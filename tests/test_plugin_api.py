@@ -1100,12 +1100,14 @@ class GoalsApprovalsScheduleTest(unittest.TestCase):
 
         sess = "INSERT INTO sessions (id, source, title, started_at, ended_at, parent_session_id) VALUES (?,?,?,?,?,?)"
         msg = "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, tool_name, timestamp) VALUES (?,?,?,?,?,?,?)"
-        up1 = '<hub-goals-update>{"add":[{"title":"Dựng trang Goal","current":true},{"title":"Viết test"}]}</hub-goals-update>'
+        up1 = '<hub-goals-update>{"add":[{"title":"Dựng trang Goal","current":true}]}</hub-goals-update>'
+        up1b = '<hub-goals-update>{"add":[{"title":"Viết test"}]}</hub-goals-update>'
         up2 = 'Xong phần 1.\n<hub-goals-update>{"done":["g1"]}</hub-goals-update>'
         make_db(home / "profiles" / "dev-frontend" / "state.db", "state.db", [
             (sess, ("bot", "desktop", "Bot Chat", now - 900, None, None)),
             (msg, ("bot", "user", "Làm trang goal\n\n<hub-goals>\nGoals: (none)\n</hub-goals>", None, None, None, now - 800)),
             (msg, ("bot", "assistant", "Đã nhận. " + up1, None, None, None, now - 790)),
+            (msg, ("bot", "assistant", "Thêm việc. " + up1b, None, None, None, now - 780)),
             (msg, ("bot", "assistant", "", json.dumps([call("w1", "write_file", {"path": self.f1, "content": "x\n"})]), None, None, now - 700)),
             (msg, ("bot", "tool", json.dumps({"success": True}), None, "w1", "write_file", now - 699)),
             (msg, ("bot", "assistant", up2, None, None, None, now - 600)),
@@ -1129,6 +1131,69 @@ class GoalsApprovalsScheduleTest(unittest.TestCase):
         self.assertNotIn("<hub-goals", joined)
         self.assertIn("Làm trang goal", joined)
         self.assertIn("Xong phần 1.", joined)
+
+    def test_agent_goal_clutter_guards(self):
+        st = {"goals": [], "current": None, "history": [], "seq": 0, "applied_id": 0}
+        ap = self.m.apply_goal_update
+        self.assertEqual(ap(st, {"add": [{"title": "Phát hành v2"}, {"title": "Viết tài liệu"}]}, "agent"), 1)
+        self.assertEqual(ap(st, {"add": [{"title": "..."}]}, "agent"), 0)  # template placeholder
+        self.assertEqual(ap(st, {"add": [{"title": "Phát hành v2."}]}, "agent"), 0)  # rewording
+        self.assertEqual(ap(st, {"add": [{"title": "Trả lời câu hỏi", "status": "done"}]}, "agent"), 0)
+        for title in ["Kế toán quý ba", "Chiến dịch Facebook", "Nâng cấp máy chủ", "Hợp đồng khách ABC",
+                      "Bộ giọng đọc", "Báo cáo tuần", "Tuyển cộng tác viên", "Sổ tay ISO"]:
+            ap(st, {"add": [{"title": title}]}, "agent")
+        active = [g for g in st["goals"] if g["status"] == "active"]
+        self.assertEqual(len(active), self.m.MAX_AGENT_ACTIVE_GOALS)
+        self.assertEqual(ap(st, {"add": [{"title": "Sếp tự thêm"}]}, "owner"), 1)  # the owner is not capped
+        st["goals"][0]["updated_at"] = time.time() - 9 * 86400
+        pub = self.m._goals_public("dev-frontend", st)
+        old = next(g for g in pub["goals"] if g["id"] == st["goals"][0]["id"])
+        self.assertTrue(old["stale"])
+        self.assertGreaterEqual(old["idle_days"], 9)
+
+    def test_tools_registry(self):
+        db = self.home / "profiles" / "dev-frontend" / "state.db"
+        con = sqlite3.connect(db)
+        tag = ('Xong.\n<hub-tools-update>{"add":[{"name":"Bảng hóa đơn","open":"http://127.0.0.1:8050","note":"Dash"},'
+               '{"name":"...","open":"<url>"},{"name":"Báo cáo","open":"C:/work/report.html"},{"name":"X","open":"y z w"}]}</hub-tools-update>')
+        con.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)", ("bot", "assistant", tag, time.time()))
+        con.commit()
+        con.close()
+        t = self.m.agent_tools("dev-frontend")["tools"]
+        self.assertEqual(sorted((x["name"], x["kind"]) for x in t), [("Báo cáo", "path"), ("Bảng hóa đơn", "url")])  # max 2 per reply, placeholder skipped
+        self.assertEqual(len(self.m.agent_tools("dev-frontend")["tools"]), 2)  # idempotent
+        msgs = self.m.conversation_detail("dev-frontend", "bot", limit=50)["messages"]
+        self.assertNotIn("<hub-tools", " ".join(m["content"] for m in msgs))
+        tid = next(x["id"] for x in t if x["name"] == "Báo cáo")
+        t = self.m.edit_tools("dev-frontend", {"action": "remove", "id": tid})["tools"]
+        self.assertEqual([x["name"] for x in t], ["Bảng hóa đơn"])
+        t = self.m.edit_tools("dev-frontend", {"action": "add", "name": "Script đối soát", "open": "python doi_soat.py"})["tools"]
+        self.assertEqual(next(x["kind"] for x in t if x["name"] == "Script đối soát"), "command")
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException):
+            self.m.edit_tools("dev-frontend", {"action": "remove", "id": "nope"})
+
+    def test_sessions_picker_and_filtered_timeline(self):
+        db = self.home / "profiles" / "dev-frontend" / "state.db"
+        con = sqlite3.connect(db)
+        now = time.time()
+        con.execute("INSERT INTO sessions (id, source, title, started_at, message_count) VALUES (?,?,?,?,?)", ("fb", "facebook", "Facebook inbox", now - 300, 2))
+        con.execute("UPDATE sessions SET message_count = 6 WHERE id = 'bot'")
+        con.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)", ("fb", "user", "Khách hỏi giá", now - 290))
+        con.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)", ("fb", "assistant", "Dạ giá là...", now - 280))
+        con.commit()
+        con.close()
+        s = self.m.agent_sessions("dev-frontend")["sessions"]
+        self.assertEqual([x["id"] for x in s], ["fb", "bot"])
+        self.assertEqual((s[0]["source"], s[1]["bot_chat"]), ("facebook", True))
+        tl = self.m.agent_timeline("dev-frontend", limit=50, session="fb")
+        self.assertEqual({i.get("session_id") for i in tl["items"]}, {"fb"})
+        self.assertIn("Khách hỏi giá", " ".join(i.get("content", "") for i in tl["items"]))
+        both = self.m.agent_timeline("dev-frontend", limit=50)
+        self.assertEqual({i.get("session_id") for i in both["items"] if i["type"] == "message"}, {"fb", "bot"})
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException):
+            self.m.agent_timeline("dev-frontend", limit=50, session="nope")
 
     def test_owner_actions_and_history(self):
         g = self.m.edit_goals("dev-frontend", {"action": "add", "title": "Tối ưu hiệu năng", "current": True})

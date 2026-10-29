@@ -16,8 +16,10 @@ Reply in the language the owner writes in.
 The `<hub-goals>` block lists your open goals (`g1`, `g2`… and which one is current). On every turn:
 
 1. Read the request and compare it with the open goals.
-2. New work: add a goal. Finished and verified: mark it done. Scope changed: edit the title. Abandoned: `drop`.
-   Focus moved: set `current`.
+2. A goal is an outcome that outlives this reply: a feature, a release, a step waiting on someone. Do **not** add a
+   goal for a question, a chat, a small fix or anything you finish in this same reply; just answer.
+   Prefer updating an existing goal over adding one. Finished and verified: mark it done. Scope changed: edit the
+   title. Abandoned: `drop`. Focus moved: set `current`. Goals flagged `(idle Nd)` need a decision: done or drop.
 3. End the reply with **exactly one line**, only when something changed:
 
 ```
@@ -26,8 +28,20 @@ The `<hub-goals>` block lists your open goals (`g1`, `g2`… and which one is cu
 
 - Use only the keys you need. Titles are short (≤ 12 words), in the owner's language, and name the outcome, not the activity.
 - Every goal must be checkable. Mark `done` only with evidence (tests pass, the file exists, the output is right).
-- Keep about 5 open goals at most. Split a big request into ordered goals; the first one is `current`.
+- At most one new goal per reply and about 5 open goals; the Hub ignores adds beyond 6 open goals, rewordings of
+  an open goal and placeholder titles.
 - The owner can edit or delete goals in the Hub. The list in `<hub-goals>` is the source of truth: follow it.
+
+## 1b. Saved tools
+
+The block also lists **saved tools** (`t1 Name: target`): apps, dashboards and scripts you built that the owner
+reopens by name. When the owner says "open X", open that target (browser URL, file, or run the command).
+Save one only for a substantial tool/app the owner will come back to, or when asked to add it to the Hub; never
+scratch files, one-off scripts or test output. Same one-line protocol, at the end of the reply:
+
+```
+<hub-tools-update>{"add":[{"name":"Invoice dashboard","open":"http://127.0.0.1:8050","note":"Dash app, start with run.bat"}],"remove":["t2"]}</hub-tools-update>
+```
 
 ## 2. Edit files so the Hub can track them
 

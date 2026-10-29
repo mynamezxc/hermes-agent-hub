@@ -27,7 +27,7 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.10'
+const PLUGIN_VERSION = '1.6.11'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
@@ -284,10 +284,10 @@ const listeners = new Set()
 const res = (status = 'idle', data = null, error = null) => ({ status, data, error })
 
 function initialState(saved) {
-  const ui = { tab: 'overview', agent: null, conv: null, repo: null, file: null, wrap: false, q: '', handoff: null, side: true, sideFile: null, sideView: 'diff', sideClosed: {} }
+  const ui = { tab: 'overview', agent: null, conv: null, repo: null, file: null, wrap: false, q: '', handoff: null, side: true, sideFile: null, sideView: 'diff', sideClosed: {}, chatSession: {} }
 
   if (saved && typeof saved === 'object') {
-    for (const k of ['tab', 'agent', 'conv', 'repo', 'file', 'wrap', 'side', 'sideView', 'sideClosed']) {
+    for (const k of ['tab', 'agent', 'conv', 'repo', 'file', 'wrap', 'side', 'sideView', 'sideClosed', 'chatSession']) {
       if (saved[k] !== undefined) {
         ui[k] = saved[k]
       }
@@ -305,6 +305,8 @@ function initialState(saved) {
     detail: {},
     diff: {},
     timeline: {},
+    sessions: {},
+    tools: {},
     chat: {},
     send: {},
     ws: {},
@@ -350,10 +352,10 @@ const convKey = c => (c ? `${c.profile}/${c.session_id}` : '')
 const diffKey = (repo, path) => `${repo}::${path}`
 
 function persistUi() {
-  const { tab, agent, conv, repo, file, wrap, side, sideView, sideClosed } = S.ui
+  const { tab, agent, conv, repo, file, wrap, side, sideView, sideClosed, chatSession } = S.ui
 
   try {
-    C.storage.set('ui', { tab, agent, conv, repo, file, wrap, side, sideView, sideClosed })
+    C.storage.set('ui', { tab, agent, conv, repo, file, wrap, side, sideView, sideClosed, chatSession })
   } catch {
     /* storage is best effort */
   }
@@ -539,7 +541,11 @@ function load() {
       const jobs = []
 
       if (S.ui.tab === 'chat' && S.ui.agent && !(S.send[S.ui.agent] && S.send[S.ui.agent].busy)) {
-        jobs.push(fetchTimeline(S.ui.agent))
+        jobs.push(fetchTimeline(S.ui.agent), fetchSessions(S.ui.agent))
+
+        if (S.ui.side) {
+          jobs.push(fetchTools(S.ui.agent))
+        }
       }
 
       if (conv && S.ui.tab === 'conversations') {
@@ -666,8 +672,14 @@ async function fetchTimeline(agent, { more = false } = {}) {
     return
   }
 
+  const pick = pickedSession(agent)
+  const scope = pick ? `&session=${enc(pick)}` : ''
   const prev = S.timeline[agent]
   const set = patch => {
+    if (pickedSession(agent) !== pick) {
+      return // the owner switched conversations while this was loading
+    }
+
     S.timeline = { ...S.timeline, [agent]: { ...(S.timeline[agent] || emptyTimeline()), ...patch } }
     emit()
   }
@@ -680,7 +692,7 @@ async function fetchTimeline(agent, { more = false } = {}) {
     set({ loadingMore: true, moreError: null })
 
     try {
-      const d = await C.rest(`/agents/${enc(agent)}/timeline?limit=150&before=${enc(prev.next_before)}`)
+      const d = await C.rest(`/agents/${enc(agent)}/timeline?limit=150&before=${enc(prev.next_before)}${scope}`)
       const cur = S.timeline[agent] || prev
 
       set({ older: [...(Array.isArray(d.items) ? d.items : []), ...cur.older], has_more: !!d.has_more, next_before: d.next_before ?? null, loadingMore: false })
@@ -691,18 +703,20 @@ async function fetchTimeline(agent, { more = false } = {}) {
     return
   }
 
-  if (tlInflight.has(agent)) {
+  const flight = `${agent}|${pick || ''}`
+
+  if (tlInflight.has(flight)) {
     return
   }
 
-  tlInflight.add(agent)
+  tlInflight.add(flight)
 
   if (!prev) {
     set({})
   }
 
   try {
-    const d = await C.rest(`/agents/${enc(agent)}/timeline?limit=150`)
+    const d = await C.rest(`/agents/${enc(agent)}/timeline?limit=150${scope}`)
     const cur = S.timeline[agent] || emptyTimeline()
     const patch = { status: 'ready', error: null, latest: Array.isArray(d.items) ? d.items : [] }
 
@@ -716,10 +730,67 @@ async function fetchTimeline(agent, { more = false } = {}) {
   } catch (err) {
     const cur = S.timeline[agent] || emptyTimeline()
 
+    if (pick && /unknown session/i.test(errText(err))) {
+      pickSession(agent, null) // the remembered conversation is gone: back to all conversations
+      return
+    }
+
     set({ status: cur.latest.length > 0 ? 'ready' : 'error', error: errText(err) })
   } finally {
-    tlInflight.delete(agent)
+    tlInflight.delete(flight)
   }
+}
+
+/* Conversations of one agent. An agent can run several sessions (say one fed by a Facebook trigger and
+   one in Hermes); the owner picks one in the chat header and the choice is remembered per agent.
+   No pick shows every conversation merged and sends to the Bot Chat, as before. */
+const pickedSession = agent => (S && S.ui.chatSession && S.ui.chatSession[agent]) || null
+
+async function fetchSessions(agent) {
+  if (!C || !agent) {
+    return
+  }
+
+  try {
+    const d = await C.rest(`/agents/${enc(agent)}/sessions`)
+
+    S.sessions = { ...S.sessions, [agent]: res('ready', Array.isArray(d && d.sessions) ? d.sessions : []) }
+  } catch (err) {
+    const prev = S.sessions[agent]
+
+    S.sessions = { ...S.sessions, [agent]: res('error', prev ? prev.data : null, errText(err)) }
+  }
+
+  emit()
+}
+
+function pickSession(agent, id) {
+  if (pickedSession(agent) === (id || null)) {
+    return
+  }
+
+  const lv = liveOf(agent)
+
+  if ((lv && lv.turn && lv.turn.active) || (S.send[agent] && S.send[agent].busy)) {
+    return // never move a running turn to another conversation
+  }
+
+  const next = { ...(S.ui.chatSession || {}) }
+
+  if (id) {
+    next[agent] = id
+  } else {
+    delete next[agent]
+  }
+
+  S.timeline = { ...S.timeline, [agent]: emptyTimeline() }
+  delete runtimeInflight[agent]
+  setLive(agent, { runtime: null, stored: null, info: null, seq: 0, epoch: null, primed: false, turn: null, errors: 0 })
+  setUi({ chatSession: next })
+  void fetchTimeline(agent)
+  ensureRuntime(agent)
+    .then(rt => (rt ? pollEvents(agent) : null))
+    .catch(() => {})
 }
 
 async function fetchChatMeta(agent) {
@@ -741,6 +812,15 @@ async function fetchChatMeta(agent) {
 // User click only: open the agent's Bot Chat session in the built-in chat pane.
 async function openChatSession(agent) {
   if (typeof host.openSession !== 'function') {
+    return
+  }
+
+  const pick = pickedSession(agent)
+  const g = pick ? ((S.sessions[agent] && S.sessions[agent].data) || []).find(x => x.id === pick) : null
+
+  if (g) {
+    await host.openSession(g.latest_id, { profile: agent })
+
     return
   }
 
@@ -843,13 +923,27 @@ async function ensureRuntime(agent, { create = false, fg = false } = {}) {
     }
   }
 
+  const pick = pickedSession(agent)
   const job = (async () => {
-    const chat = await C.rest(`/agents/${enc(agent)}/chat`)
+    let chat = null
+
+    if (pick) {
+      if (!(S.sessions[agent] && S.sessions[agent].data)) {
+        await fetchSessions(agent)
+      }
+
+      const g = ((S.sessions[agent] && S.sessions[agent].data) || []).find(x => x.id === pick)
+
+      chat = { session_id: g ? g.latest_id : pick }
+    } else {
+      chat = await C.rest(`/agents/${enc(agent)}/chat`)
+    }
+
     let r = null
 
     if (chat && chat.session_id) {
       r = await rp(agent, 'session.resume', { session_id: chat.session_id }, fg)
-    } else if (create) {
+    } else if (create && !pick) {
       r = await rp(agent, 'session.create', { profile: agent, title: 'Bot Chat', hidden: true, follow_profile_config: true })
 
       if (r && r.session_id) {
@@ -870,6 +964,10 @@ async function ensureRuntime(agent, { create = false, fg = false } = {}) {
       throw new Error('The gateway returned no runtime session id.')
     }
 
+    if (pickedSession(agent) !== pick) {
+      return null // switched to another conversation meanwhile
+    }
+
     setLive(agent, { runtime, stored: (chat && chat.session_id) || r.stored_session_id || null, info: r.info || null, seq: 0, epoch: null, primed: false, errors: 0 })
 
     if (r.running) {
@@ -884,7 +982,9 @@ async function ensureRuntime(agent, { create = false, fg = false } = {}) {
   try {
     return await job
   } finally {
-    delete runtimeInflight[agent]
+    if (runtimeInflight[agent] === job) {
+      delete runtimeInflight[agent]
+    }
   }
 }
 
@@ -1115,11 +1215,6 @@ async function finishTurn(agent, { drain = true } = {}) {
 
   await fetchTimeline(agent)
 
-  for (let i = 0; i < SAVE_RETRIES && since && !timelineHasReply(agent, since); i += 1) {
-    await new Promise(resolve => setTimeout(resolve, SAVE_RETRY_MS))
-    await fetchTimeline(agent)
-  }
-
   const saved = !since || timelineHasReply(agent, since)
   const lv = liveOf(agent)
 
@@ -1136,6 +1231,17 @@ async function finishTurn(agent, { drain = true } = {}) {
 
   void fetchWorkspace(agent)
   void fetchChatMeta(agent)
+
+  if (!saved) {
+    // Re-read in the background: the composer is free at once (waiting here locked it for up to 6 s), and
+    // settleUnsaved drops the kept card as soon as a refresh brings the reply in.
+    void (async () => {
+      for (let i = 0; i < SAVE_RETRIES && !timelineHasReply(agent, since); i += 1) {
+        await new Promise(resolve => setTimeout(resolve, SAVE_RETRY_MS))
+        await fetchTimeline(agent)
+      }
+    })()
+  }
 
   if (drain) {
     drainQueue(agent)
@@ -1422,6 +1528,33 @@ async function goalAction(agent, body) {
   return data
 }
 
+async function fetchTools(agent) {
+  if (!C || !agent) {
+    return
+  }
+
+  try {
+    const data = await C.rest(`/agents/${enc(agent)}/tools`)
+
+    S.tools = { ...S.tools, [agent]: res('ready', data) }
+  } catch (err) {
+    const prev = S.tools[agent]
+
+    S.tools = { ...S.tools, [agent]: res('error', prev ? prev.data : null, errText(err)) }
+  }
+
+  emit()
+}
+
+async function toolAction(agent, body) {
+  const data = await C.rest(`/agents/${enc(agent)}/tools`, { method: 'POST', body })
+
+  S.tools = { ...S.tools, [agent]: res('ready', data) }
+  emit()
+
+  return data
+}
+
 async function fetchGoalsHistory() {
   if (!C) {
     return
@@ -1448,7 +1581,9 @@ function goalsBlock(agent) {
   const st = S.goals[agent]
   const d = st && st.data
   const goals = ((d && d.goals) || []).filter(g => g.status === 'active')
-  const lines = goals.length ? goals.map(g => `- ${g.id}${g.id === d.current ? ' (current)' : ''}: ${g.title}`).join('\n') : '- (none)'
+  const lines = goals.length ? goals.map(g => `- ${g.id}${g.id === d.current ? ' (current)' : ''}: ${g.title}${g.stale ? ` (idle ${g.idle_days}d: close or drop it)` : ''}`).join('\n') : '- (none)'
+  const tools = ((S.tools[agent] && S.tools[agent].data && S.tools[agent].data.tools) || []).slice(0, 30)
+  const toolLines = tools.length ? tools.map(t => `- ${t.id} ${t.name}: ${t.target}`).join('\n') : '- (none)'
 
   const team = list('agents', 'agents').length > 1
   const teamMd = (S.team && S.team.data && S.team.data.team_md) || '<HERMES_HOME>/agents-hub/TEAM.md'
@@ -1457,9 +1592,13 @@ function goalsBlock(agent) {
     '<hub-goals>',
     'Active goals:',
     lines,
-    'If this message sets, changes or completes objectives (or you finished one), end your reply with ONE line:',
+    'A goal is an outcome that outlives this reply (a feature, a release, a step waiting on someone). Never add one for a question, a chat, a small fix or anything you finish in this reply; prefer completing or editing an existing goal; at most one new goal per reply.',
+    'Only when goals change, end your reply with ONE line:',
     '<hub-goals-update>{"add":[{"title":"...","current":true}],"done":["g1"],"current":"g2","edit":[{"id":"g1","title":"..."}],"drop":["g3"]}</hub-goals-update>',
-    'Use only the keys you need, short outcome titles in the user\'s language; mark done only with evidence. Omit the line when nothing changes. Do not mention this block.',
+    'Use only the keys you need, short outcome titles in the user\'s language; mark done only with evidence. Do not mention this block.',
+    'Saved tools (open one when the owner names it):',
+    toolLines,
+    'Save a tool only for a substantial tool/app/dashboard you built that the owner will reopen, or when asked to add it to the Hub; never scratch files, one-off scripts or test output. Add or remove with ONE line: <hub-tools-update>{"add":[{"name":"...","open":"<url, absolute path or command>","note":"..."}],"remove":["t1"]}</hub-tools-update>',
     'Agents Hub: once per session load skill agents-hub:hub-operating. Edit files with write_file/patch (the owner reviews diffs and can roll back).',
     team ? `Team roster: ${teamMd}; hand work to other members per skill agents-hub:team-coordination only when it needs them.` : null,
     '</hub-goals>'
@@ -2557,8 +2696,12 @@ function renderMarkdown(text, depth = 0) {
   return blocks
 }
 
+// Reply tags the Hub applies (goals, saved tools) never show, not even half-streamed.
+const HUB_REPLY_TAG = /<hub-(goals|tools)-update>[\s\S]*?(<\/hub-\1-update>|$)/g
+const hideHubTags = text => (typeof text === 'string' && text.includes('<hub-') ? text.replace(HUB_REPLY_TAG, '').trimEnd() : text)
+
 function Markdown({ text }) {
-  return h('div', { className: 'ah-md' }, renderMarkdown(text))
+  return h('div', { className: 'ah-md' }, renderMarkdown(hideHubTags(text)))
 }
 
 /* ───────────────────────── agents rail ───────────────────────── */
@@ -4788,6 +4931,8 @@ function ChatView({ s }) {
   useEffect(() => {
     void fetchTimeline(agent)
     void fetchChatMeta(agent)
+    void fetchSessions(agent)
+    void fetchTools(agent)
     void fetchWorkspace(agent)
     void fetchActivity(agent)
     void fetchGoals(agent)
@@ -5107,6 +5252,7 @@ function ChatView({ s }) {
           h(Icon, { name: sideOpen ? 'layout-sidebar-right' : 'layout-sidebar-right-off', size: 18 })
         )
       ),
+      h(SessionPicker, { s, agent }),
       h(
         'div',
         { className: 'ah-chat-body' },
@@ -5120,6 +5266,64 @@ function ChatView({ s }) {
       h(Composer, { s, agent, onSent: () => { stick.current = true; setPill(false) } })
     ),
     s.ui.handoff ? h(HandoffPanel, { s }) : sideOpen ? h(ChatSide, { s, agent }) : null
+  )
+}
+
+const SOURCE_LABEL = { desktop: 'Hermes', local: 'CLI', cli: 'CLI', tui: 'CLI', oneshot: 'One-shot', api: 'API', webhook: 'Webhook', facebook: 'Facebook', messenger: 'Messenger', zalo: 'Zalo', telegram: 'Telegram', discord: 'Discord', slack: 'Slack', whatsapp: 'WhatsApp', email: 'Email' }
+const SOURCE_ICON = { desktop: 'comment', local: 'terminal', cli: 'terminal', tui: 'terminal', api: 'plug', webhook: 'plug', email: 'mail' }
+
+function sourceLabel(src) {
+  const k = String(src || '').toLowerCase()
+
+  return SOURCE_LABEL[k] || (k ? k.charAt(0).toUpperCase() + k.slice(1) : 'Session')
+}
+
+// Switch between an agent's conversations (shown only when it has two or more). The pick is remembered.
+function SessionPicker({ s, agent }) {
+  const st = s.sessions[agent]
+  const items = (st && st.data) || []
+
+  if (items.length < 2) {
+    return null
+  }
+
+  const pick = pickedSession(agent)
+  const lv = s.live[agent]
+  const locked = !!((lv && lv.turn && lv.turn.active) || (s.send[agent] && s.send[agent].busy))
+  const chip = (id, label, sub, icon, title) => {
+    const on = (pick || null) === (id || null)
+
+    return h(
+      'button',
+      {
+        key: id || '*',
+        type: 'button',
+        role: 'tab',
+        'aria-selected': on ? 'true' : 'false',
+        className: cx('ah-sess-chip ah-state', on && 'is-on'),
+        disabled: locked && !on,
+        title: locked && !on ? 'Switch after the current reply finishes' : title,
+        onClick: () => pickSession(agent, id)
+      },
+      h(Icon, { name: icon, size: 14 }),
+      h('span', { className: 'ah-sess-name' }, label),
+      sub ? h('span', { className: 'ah-sess-sub' }, sub) : null
+    )
+  }
+
+  return h(
+    'div',
+    { className: 'ah-sess-bar', role: 'tablist', 'aria-label': 'Conversations of this agent' },
+    chip(null, 'All', String(items.length), 'list-unordered', 'Every conversation, merged. New messages go to the Bot Chat.'),
+    items.map(g =>
+      chip(
+        g.id,
+        g.bot_chat ? 'Bot Chat' : g.title,
+        `${sourceLabel(g.source)} · ${relTime(g.last_at, s.now)}`,
+        g.bot_chat ? 'comment' : SOURCE_ICON[String(g.source || '').toLowerCase()] || 'comment-discussion',
+        `${g.title} (${sourceLabel(g.source)}, ${g.message_count} messages). New messages go to this conversation.`
+      )
+    )
   )
 }
 
@@ -5403,7 +5607,7 @@ function GoalsSection({ s, agent }) {
           { className: 'ah-goal-body' },
           current ? h('span', { className: 'ah-goal-tag' }, 'Current') : null,
           h('span', { className: 'ah-goal-title' }, g.title),
-          h('span', { className: 'ah-goal-meta' }, `${g.by === 'agent' ? 'Set by agent' : 'Set by you'} · ${g.status === 'done' ? `done ${relTime(g.done_at, s.now)}` : relTime(g.updated_at || g.created_at, s.now)}`)
+          h('span', { className: 'ah-goal-meta' }, `${g.by === 'agent' ? 'Set by agent' : 'Set by you'} · ${g.status === 'done' ? `done ${relTime(g.done_at, s.now)}` : relTime(g.updated_at || g.created_at, s.now)}`, g.stale ? h('span', { className: 'ah-goal-stale', title: 'No progress for a while: mark it done or delete it' }, ` · idle ${g.idle_days} days`) : null)
         )
       ),
       h(
@@ -5475,6 +5679,107 @@ function GoalsSection({ s, agent }) {
         }
       })
     ),
+    err ? h('p', { className: 'ah-live-error' }, err) : null
+  )
+}
+
+const TOOL_ICON = { url: 'globe', path: 'file-symlink-file', command: 'terminal' }
+const RUNNABLE_EXT = /\.(exe|bat|cmd|ps1|vbs|msi|lnk|com|scr|jar|sh)$/i
+
+function ToolsSection({ s, agent }) {
+  const st = s.tools[agent]
+  const d = st && st.data
+  const [err, setErr] = useState(null)
+  const [note, setNote] = useState(null)
+  const [busy, setBusy] = useState(false)
+
+  if (!d) {
+    return h('p', { className: 'ah-side-empty' }, st && st.status === 'error' ? `Could not load tools (${st.error}).` : 'Loading tools…')
+  }
+
+  const os = C && C.os
+  const copy = async t => {
+    const ok = os && typeof os.writeClipboard === 'function' ? await os.writeClipboard(t.target) : false
+
+    setNote(ok ? `Copied: ${t.target}` : t.target)
+  }
+
+  const open = async t => {
+    setErr(null)
+    setNote(null)
+
+    if (t.kind === 'command') {
+      await copy(t) // the Hub never runs commands; paste it, or ask the agent to run it
+
+      return
+    }
+
+    if (RUNNABLE_EXT.test(t.target) && typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(`Run ${t.target}?`)) {
+      return
+    }
+
+    const ok = os && typeof os.openExternal === 'function' ? await os.openExternal(t.target) : false
+
+    if (!ok) {
+      setErr(`Could not open ${t.target}. Ask the agent to open it.`)
+    }
+  }
+
+  const remove = async t => {
+    const okDel = typeof window === 'undefined' || typeof window.confirm !== 'function' || window.confirm(`Remove "${t.name}" from saved tools?`)
+
+    if (!okDel) {
+      return
+    }
+
+    setBusy(true)
+    setErr(null)
+
+    try {
+      await toolAction(agent, { action: 'remove', id: t.id })
+    } catch (e) {
+      setErr(errText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const tools = d.tools || []
+
+  return h(
+    'div',
+    { className: 'ah-tools' },
+    tools.length === 0
+      ? h('p', { className: 'ah-side-empty' }, 'No saved tools. Tools and apps this agent builds for you to reopen show here; ask it to add one to the Hub.')
+      : h(
+          'ul',
+          { className: 'ah-goal-list' },
+          tools.map(t =>
+            h(
+              'li',
+              { key: t.id, className: 'ah-goal ah-tool' },
+              h(
+                'button',
+                { type: 'button', className: 'ah-goal-main ah-state', title: t.kind === 'command' ? `Copy the command: ${t.target}` : `Open ${t.target}`, onClick: () => void open(t) },
+                h(Icon, { name: TOOL_ICON[t.kind] || 'tools', size: 14, className: 'ah-goal-ico' }),
+                h(
+                  'span',
+                  { className: 'ah-goal-body' },
+                  h('span', { className: 'ah-goal-title' }, t.name),
+                  t.note ? h('span', { className: 'ah-goal-meta' }, t.note) : null,
+                  h('span', { className: 'ah-goal-meta ah-mono ah-tool-target' }, t.target)
+                )
+              ),
+              h(
+                'span',
+                { className: 'ah-goal-acts' },
+                h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Copy', 'aria-label': `Copy: ${t.name}`, onClick: () => void copy(t) }, h(Icon, { name: 'copy', size: 14 })),
+                h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Remove', 'aria-label': `Remove: ${t.name}`, disabled: busy, onClick: () => void remove(t) }, h(Icon, { name: 'trash', size: 14 }))
+              )
+            )
+          )
+        ),
+    note ? h('p', { className: 'ah-side-empty ah-mono' }, note) : null,
     err ? h('p', { className: 'ah-live-error' }, err) : null
   )
 }
@@ -5717,7 +6022,8 @@ const DIFF_SOURCE = { git: 'Against git HEAD', session: 'Patches in this session
 function FilePreview({ s, agent, path }) {
   const entry = s.preview[previewKey(agent, path)]
   const d = entry && entry.data
-  const view = s.ui.sideView === 'content' ? 'content' : 'diff'
+  const isMd = /\.(md|markdown|mdx)$/i.test(path || '')
+  const view = s.ui.sideView === 'preview' ? (isMd ? 'preview' : 'content') : s.ui.sideView === 'content' ? 'content' : 'diff'
   const wrap = !!s.ui.wrap
   const ws = s.ws[agent] && s.ws[agent].data
   const f = ws && Array.isArray(ws.files) ? ws.files.find(x => x.path === path) : null
@@ -5741,6 +6047,8 @@ function FilePreview({ s, agent, path }) {
     body = h(EmptyState, { icon: 'file', title: 'The file no longer exists', hint: 'The agent deleted or moved this file.' })
   } else if (d.binary) {
     body = h(EmptyState, { icon: 'file-media', title: 'Binary file', hint: 'Binary files cannot be previewed.' })
+  } else if (view === 'preview') {
+    body = h('div', { className: 'ah-md-preview', 'aria-label': `Preview ${d.name}` }, h(Markdown, { text: d.content }))
   } else {
     body = h(CodeBody, { text: d.content, wrap, label: `Content ${d.name}` })
   }
@@ -5764,8 +6072,9 @@ function FilePreview({ s, agent, path }) {
         { className: 'ah-seg', role: 'tablist' },
         [
           ['diff', 'Changes', 'diff'],
-          ['content', 'Content', 'file-code']
-        ].map(([id, label, icon]) =>
+          ['content', 'Content', 'file-code'],
+          isMd ? ['preview', 'Preview', 'open-preview'] : null
+        ].filter(Boolean).map(([id, label, icon]) =>
           h('button', { key: id, type: 'button', role: 'tab', 'aria-selected': view === id ? 'true' : 'false', className: cx('ah-seg-btn ah-state', view === id && 'is-on'), onClick: () => setUi({ sideView: id }) }, h(Icon, { name: icon, size: 14 }), h('span', null, label))
         )
       ),
@@ -5798,6 +6107,8 @@ function ChatSide({ s, agent }) {
   const activeGoals = ((s.goals[agent] && s.goals[agent].data && s.goals[agent].data.goals) || []).filter(g => g.status === 'active').length
   const goalsSec = h(SideSection, { key: 'goals', id: 'goals', title: 'Goal', icon: 'target', count: activeGoals }, h(GoalsSection, { s, agent }))
   const cmdsSec = h(SideSection, { key: 'cmds', id: 'cmds', title: 'Running commands', icon: 'terminal', count: cmdCount(s, agent) }, h(CommandsSection, { s, agent }))
+  const toolCount = ((s.tools[agent] && s.tools[agent].data && s.tools[agent].data.tools) || []).length
+  const toolsSec = h(SideSection, { key: 'tools', id: 'tools', title: 'Saved tools', icon: 'tools', count: toolCount }, h(ToolsSection, { s, agent }))
   let content
 
   if (!entry || (entry.status === 'loading' && !data)) {
@@ -5820,10 +6131,10 @@ function ChatSide({ s, agent }) {
       { className: 'ah-side-head' },
       h('h2', { className: 'ah-side-title' }, 'Session'),
       h('span', { className: 'ah-spacer' }),
-      h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Reload', 'aria-label': 'Reload', onClick: () => void fetchWorkspace(agent) }, h(Icon, { name: 'sync', size: 14, spinning: !!(entry && entry.status === 'loading') })),
+      h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Reload', 'aria-label': 'Reload', onClick: () => { void fetchWorkspace(agent); void fetchTools(agent) } }, h(Icon, { name: 'sync', size: 14, spinning: !!(entry && entry.status === 'loading') })),
       h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Hide panel', 'aria-label': 'Hide panel', onClick: () => setUi({ side: false }) }, h(Icon, { name: 'close', size: 14 }))
     ),
-    h('div', { className: 'ah-side-body' }, goalsSec, cmdsSec, content)
+    h('div', { className: 'ah-side-body' }, goalsSec, cmdsSec, toolsSec, content)
   )
 }
 
@@ -7786,6 +8097,15 @@ const CSS = `
 .ah-root .ah-approved-note{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .ah-root .ah-link{padding:0;border:0;background:none;color:var(--ah-primary);font:inherit;text-decoration:underline;cursor:pointer}
 .ah-root .ah-goals{display:flex;flex-direction:column;gap:6px}
+.ah-root .ah-sess-bar{display:flex;gap:6px;flex:none;overflow-x:auto;padding:8px 20px;border-bottom:1px solid var(--ah-outline-variant);scrollbar-width:thin}
+.ah-root .ah-sess-chip{display:inline-flex;align-items:center;gap:6px;flex:none;max-width:280px;height:30px;padding:0 10px;border:1px solid var(--ah-outline-variant);border-radius:999px;background:transparent;color:inherit;font:inherit;font-size:12.5px;cursor:pointer}
+.ah-root .ah-sess-chip.is-on{background:color-mix(in srgb,var(--ah-primary) 14%,transparent);border-color:color-mix(in srgb,var(--ah-primary) 55%,transparent);color:var(--ah-primary)}
+.ah-root .ah-sess-chip:disabled{opacity:.5;cursor:default}
+.ah-root .ah-sess-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.ah-root .ah-sess-sub{flex:none;font-size:11px;color:var(--ah-on-surface-variant)}
+.ah-root .ah-goal-stale{color:var(--ah-warn,#b26a00)}
+.ah-root .ah-tool-target{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.ah-root .ah-md-preview{padding:12px 16px;overflow:auto;height:100%;user-select:text;-webkit-user-select:text}
 .ah-root .ah-goal-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
 .ah-root .ah-goal{position:relative;display:flex;align-items:flex-start;gap:4px;border-radius:var(--ah-r-md);padding:2px}
 .ah-root .ah-goal.is-current{background:color-mix(in srgb,var(--ah-primary) 10%,transparent);outline:1px solid color-mix(in srgb,var(--ah-primary) 35%,transparent)}
