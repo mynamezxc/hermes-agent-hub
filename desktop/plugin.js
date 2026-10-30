@@ -27,7 +27,7 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.14'
+const PLUGIN_VERSION = '1.6.15'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
@@ -7042,9 +7042,54 @@ async function fetchTeam() {
   emit()
 }
 
+// The Desktop denies window.open / target=_blank from plugin pages, so links go through the OS bridge.
+// Only http(s) leaves the app; false means the caller shows the link to copy by hand.
+async function openUrl(url) {
+  if (!/^https?:\/\//i.test(String(url || ''))) {
+    return false
+  }
+
+  const bridges = [C && C.os, typeof window !== 'undefined' ? window.hermesDesktop : null]
+
+  for (const b of bridges) {
+    if (b && typeof b.openExternal === 'function') {
+      try {
+        const ok = await b.openExternal(url)
+
+        if (ok !== false) {
+          return true
+        }
+      } catch {
+        /* try the next bridge */
+      }
+    }
+  }
+
+  return false
+}
+
+async function copyText(text) {
+  try {
+    if (C && C.os && typeof C.os.writeClipboard === 'function' && (await C.os.writeClipboard(text))) {
+      return true
+    }
+  } catch {
+    /* fall back to the web clipboard */
+  }
+
+  try {
+    await navigator.clipboard.writeText(text)
+
+    return true
+  } catch {
+    return false
+  }
+}
+
 function LoginPanel({ agent, provider, onDone }) {
   const [sess, setSess] = useState(null)
   const [err, setErr] = useState(null)
+  const [linkNote, setLinkNote] = useState(null)
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -7121,11 +7166,31 @@ function LoginPanel({ agent, provider, onDone }) {
           { className: 'ah-login-step' },
           h('span', null, '1. Open the verification page and enter the code:'),
           h('code', { className: 'ah-login-code' }, sess.user_code),
-          h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => navigator.clipboard && navigator.clipboard.writeText(sess.user_code) }, h(Icon, { name: 'copy', size: 14 }), ' Copy code')
+          h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: async () => setLinkNote((await copyText(sess.user_code)) ? 'Code copied.' : null) }, h(Icon, { name: 'copy', size: 14 }), ' Copy code')
         )
       : null,
     link
-      ? h('div', { className: 'ah-login-step' }, h('a', { className: 'ah-btn ah-btn-tonal ah-btn-sm', href: link, target: '_blank', rel: 'noreferrer' }, h(Icon, { name: 'link-external', size: 14 }), sess.user_code ? ' Open verification page' : ' Open authorize page'))
+      ? h(
+          'div',
+          { className: 'ah-login-step' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state',
+              onClick: async () => {
+                const ok = await openUrl(link)
+
+                setLinkNote(ok ? 'Opened in your browser.' : 'Could not open the browser: copy the link below and open it yourself.')
+              }
+            },
+            h(Icon, { name: 'link-external', size: 14 }),
+            sess.user_code ? ' Open verification page' : ' Open authorize page'
+          ),
+          h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: async () => setLinkNote((await copyText(link)) ? 'Link copied.' : 'Select the link below and copy it.') }, h(Icon, { name: 'copy', size: 14 }), ' Copy link'),
+          h('code', { className: 'ah-login-link ah-mono', title: link }, link),
+          linkNote ? h('span', { className: 'ah-row-sub' }, linkNote) : null
+        )
       : null,
     sess && sess.kind === 'cli' && sess.status === 'pending'
       ? h(
@@ -7974,6 +8039,7 @@ const CSS = `
 .ah-root .ah-login{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--ah-outline-variant)}
 .ah-root .ah-login-step{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
 .ah-root .ah-login-step .ah-input{flex:1;min-width:220px}
+.ah-root .ah-login-link{flex-basis:100%;font-size:12px;padding:4px 8px;border-radius:var(--ah-r-sm);background:var(--ah-surface-highest);user-select:all;word-break:break-all}
 .ah-root .ah-login-code{font-family:var(--ah-mono);font-size:18px;font-weight:700;letter-spacing:.12em;padding:2px 10px;border-radius:var(--ah-r-sm);background:var(--ah-surface-highest)}
 .ah-root .ah-login-log pre{max-height:160px;overflow:auto;font-size:11px;margin:4px 0 0;white-space:pre-wrap}
 .ah-root .ah-team-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-top:1px solid var(--ah-outline-variant)}

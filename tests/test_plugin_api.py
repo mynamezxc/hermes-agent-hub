@@ -909,6 +909,14 @@ class InstallerScriptTest(unittest.TestCase):
         self.assertIsNotNone(page)
         self.assertEqual(page.group(1), yaml_v.group(1), "bump PLUGIN_VERSION in desktop/plugin.js with plugin.yaml")
 
+    @unittest.skipUnless((API.parent.parent / "desktop" / "plugin.js").exists(), "desktop half ships in the repo only")
+    def test_page_links_open_through_the_os_bridge(self):
+        """Hermes Desktop denies window.open/target=_blank from plugin pages (setWindowOpenHandler), so a
+        target=_blank link (e.g. the Codex verification page) silently does nothing: use openUrl()."""
+        js = (API.parent.parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+        self.assertNotIn("target: '_blank'", js)
+        self.assertIn("async function openUrl(", js)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
