@@ -1362,3 +1362,80 @@ class RunningCommandsTest(unittest.TestCase):
         only = self.m.running_commands("dev-frontend")
         self.assertEqual([i["id"] for i in only["items"]], ["fg:dev-frontend:c1"])
         self.assertTrue(all(not k.startswith("_") for i in r["items"] for k in i))
+
+
+class TeamVisibilityTest(unittest.TestCase):
+    """Who is doing what: blocked/queued cards are not "Working", killed workers go stale, block reasons and
+    progress notes reach the Hub, and the shared team space exists."""
+
+    def setUp(self):
+        root = FIX / "teamvis"
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+        home = root / "home"
+        for p in ("qa", "marketing"):
+            (home / "profiles" / p).mkdir(parents=True)
+        (home / "config.yaml").write_text("model:\n  default: m\n  provider: anthropic\n", encoding="utf-8")
+        now = time.time()
+        ins = "INSERT INTO tasks (id,title,assignee,status,created_by,created_at,block_kind) VALUES (?,?,?,?,?,?,?)"
+        ev = "INSERT INTO task_events (task_id,kind,payload,created_at) VALUES (?,?,?,?)"
+        cm = "INSERT INTO task_comments (task_id,author,body,created_at) VALUES (?,?,?,?)"
+        make_db(home / "kanban.db", "kanban.db", [
+            (ins, ("tb", "Blocked card", "marketing", "blocked", "default", int(now - 900), "needs_input")),
+            (ins, ("tq", "Queued card", "marketing", "ready", "default", int(now - 800), None)),
+            (ins, ("tr", "Running card", "qa", "running", "default", int(now - 700), None)),
+            (ins, ("tc", "Owner card", "qa", "blocked", "qa", int(now - 600), "capability")),
+            (ev, ("tb", "blocked", json.dumps({"reason": "Need write access to docs/"}), int(now - 500))),
+            (ev, ("tr", "heartbeat", json.dumps({"note": "3/8 articles written"}), int(now - 60))),
+            (ev, ("tr", "heartbeat", None, int(now - 30))),
+            (cm, ("tb", "default", "please write the docs", int(now - 850))),
+            (cm, ("tb", "marketing", "@default may I write in docs/?", int(now - 510))),
+            (cm, ("tq", "default", "queued work", int(now - 790))),
+        ])
+        sess = ("INSERT INTO sessions (id, source, started_at, ended_at, last_activity_at, display_name) "
+                "VALUES (?,?,?,?,?,?)")
+        make_db(home / "profiles" / "qa" / "state.db", "state.db", [
+            (sess, ("killed", "tool", now - 4000, None, now - 3500, "worker killed mid-run")),
+            (sess, ("live", "tool", now - 300, None, now - 20, "live worker")),
+        ])
+        make_db(home / "profiles" / "marketing" / "state.db", "state.db", [])
+        make_db(home / "state.db", "state.db", [])
+        os.environ["HERMES_HOME"] = str(home)
+        self.home = home
+        spec = importlib.util.spec_from_file_location("agents_hub_api_teamvis", API)
+        self.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.m)
+
+    def test_only_running_cards_count_as_working(self):
+        convs = {c["session_id"]: c for c in self.m._kanban_convs()}
+        self.assertEqual(convs["tb"]["status"], "blocked")
+        self.assertEqual(convs["tq"]["status"], "queued")
+        peers = {p["agent"]: p for p in self.m.chat_peers("default", time.time())}
+        self.assertEqual(peers["marketing"]["running"], 0)  # was 2 before: blocked + ready showed "Working"
+        self.assertEqual(peers["marketing"]["blocked"], 1)
+
+    def test_open_session_silent_for_long_is_stopped(self):
+        rows = {r["id"]: r for r in self.m.query(self.m._state_db("qa"), "SELECT * FROM sessions")}
+        self.assertEqual(self.m._session_status(rows["killed"]), "stopped")
+        self.assertEqual(self.m._session_status(rows["live"]), "running")
+
+    def test_tasks_show_block_reason_waiting_on_progress_and_last_comment(self):
+        t = {x["id"]: x for x in self.m.tasks(limit=50)["tasks"]}
+        self.assertEqual(t["tb"]["block_reason"], "Need write access to docs/")
+        self.assertEqual(t["tb"]["waiting_on"], "default")  # needs_input → the agent that created the card
+        self.assertEqual(t["tc"]["waiting_on"], "owner")  # capability → only the owner can unblock
+        self.assertEqual(t["tr"]["progress"]["text"], "3/8 articles written")  # empty heartbeat does not hide it
+        self.assertEqual(t["tb"]["last_comment"]["author"], "marketing")
+        self.assertNotIn("block_reason", t["tr"])
+
+    def test_shared_space_is_created_and_never_overwritten(self):
+        self.m.ensure_setup(force=True)
+        d = self.home / "agents-hub" / "shared"
+        self.assertTrue((d / "files").is_dir())
+        (d / "NOTES.md").write_text("# Team notes\n- 2026-10-31 qa: keep this\n", encoding="utf-8")
+        (d / "files" / "2026-10-31-x.md").write_text("x", encoding="utf-8")
+        self.m.ensure_setup(force=True)
+        s = self.m.shared()
+        self.assertIn("keep this", s["notes"])
+        self.assertEqual([f["name"] for f in s["files"]], ["2026-10-31-x.md"])
+        self.assertIn("agents-hub/shared", (self.home / "agents-hub" / "TEAM.md").read_text(encoding="utf-8"))

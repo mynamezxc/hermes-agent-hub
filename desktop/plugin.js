@@ -27,7 +27,7 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.15'
+const PLUGIN_VERSION = '1.6.16'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
@@ -107,6 +107,7 @@ const TASK_COLUMNS = [
   { id: 'todo', label: 'To do' },
   { id: 'ready', label: 'Ready' },
   { id: 'running', label: 'Running' },
+  { id: 'review', label: 'Review' },
   { id: 'blocked', label: 'Blocked' },
   { id: 'done', label: 'Done' }
 ]
@@ -139,6 +140,7 @@ const STATUS_LABEL = {
   error: 'Error',
   blocked: 'Blocked',
   queued: 'Queued',
+  review: 'In review',
   stopped: 'Stopped'
 }
 
@@ -155,6 +157,7 @@ const STATUS_TONE = {
   scheduled: 'neutral',
   pending: 'neutral',
   queued: 'neutral',
+  review: 'info',
   idle: 'neutral',
   stopped: 'neutral'
 }
@@ -302,6 +305,7 @@ function initialState(saved) {
     works: res(),
     tasks: res(),
     changes: res(),
+    shared: res(),
     detail: {},
     diff: {},
     timeline: {},
@@ -412,7 +416,8 @@ const ENDPOINTS = {
   conversations: '/conversations?limit=100',
   works: '/works',
   tasks: '/tasks',
-  changes: '/changes'
+  changes: '/changes',
+  shared: '/shared'
 }
 
 const REST_TIMEOUT_MS = 20000
@@ -1578,8 +1583,47 @@ async function approveFiles(agent, body) {
   await fetchWorkspace(agent)
 }
 
-// Sent with each Hub message so the agent keeps its goals current; the Hub strips it from the chat.
-function goalsBlock(agent) {
+// Hub state the agent needs (its goals and saved tools), sent on the FIRST message of a chat session and
+// afterwards only when it changed. The rules (how to update goals/tools, files, team) live in the
+// agents-hub:hub-operating skill and the agent's own SOUL/memory, not in every message: a 1.7 KB block on each
+// turn bloated every chat and, being new text each time, never reused the model's prompt cache.
+const HUB_SENT_KEY = 'agents-hub.hubStateSent'
+let hubSent = null
+
+function hubSentMap() {
+  if (hubSent) {
+    return hubSent
+  }
+
+  try {
+    hubSent = JSON.parse((typeof localStorage !== 'undefined' && localStorage.getItem(HUB_SENT_KEY)) || '{}') || {}
+  } catch {
+    hubSent = {}
+  }
+
+  return hubSent
+}
+
+function rememberHubSent(key, sig) {
+  const m = hubSentMap()
+
+  delete m[key]
+  m[key] = sig
+
+  const keys = Object.keys(m)
+
+  for (const k of keys.slice(0, Math.max(0, keys.length - 200))) {
+    delete m[k]
+  }
+
+  try {
+    localStorage.setItem(HUB_SENT_KEY, JSON.stringify(m))
+  } catch {
+    /* private mode / quota: the in-memory map still dedupes this window */
+  }
+}
+
+function hubState(agent) {
   const st = S.goals[agent]
   const d = st && st.data
   const goals = ((d && d.goals) || []).filter(g => g.status === 'active')
@@ -1587,24 +1631,33 @@ function goalsBlock(agent) {
   const tools = ((S.tools[agent] && S.tools[agent].data && S.tools[agent].data.tools) || []).slice(0, 30)
   const toolLines = tools.length ? tools.map(t => `- ${t.id} ${t.name}: ${t.target}`).join('\n') : '- (none)'
 
+  return `Active goals:\n${lines}\nSaved tools:\n${toolLines}`
+}
+
+// Returns { block, key, sig }: block is '' when this session already has the current state.
+function goalsBlock(agent, runtime) {
+  const state = hubState(agent)
+  const key = `${agent}:${runtime || ''}`
+  const first = !(key in hubSentMap())
+
+  if (!first && hubSentMap()[key] === state) {
+    return { block: '', key, sig: state }
+  }
+
   const team = list('agents', 'agents').length > 1
   const teamMd = (S.team && S.team.data && S.team.data.team_md) || '<HERMES_HOME>/agents-hub/TEAM.md'
-
-  return [
+  const shared = (S.team && S.team.data && S.team.data.shared_dir) || (S.shared && S.shared.data && S.shared.data.dir) || ''
+  const block = [
     '<hub-goals>',
-    'Active goals:',
-    lines,
-    'A goal is an outcome that outlives this reply (a feature, a release, a step waiting on someone). Never add one for a question, a chat, a small fix or anything you finish in this reply; prefer completing or editing an existing goal; at most one new goal per reply.',
-    'Only when goals change, end your reply with ONE line:',
-    '<hub-goals-update>{"add":[{"title":"...","current":true}],"done":["g1"],"current":"g2","edit":[{"id":"g1","title":"..."}],"drop":["g3"]}</hub-goals-update>',
-    'Use only the keys you need, short outcome titles in the user\'s language; mark done only with evidence. Do not mention this block.',
-    'Saved tools (open one when the owner names it):',
-    toolLines,
-    'Save a tool only for a substantial tool/app/dashboard you built that the owner will reopen, or when asked to add it to the Hub; never scratch files, one-off scripts or test output. Add or remove with ONE line: <hub-tools-update>{"add":[{"name":"...","open":"<url, absolute path or command>","note":"..."}],"remove":["t1"]}</hub-tools-update>',
-    'Agents Hub: once per session load skill agents-hub:hub-operating. Edit files with write_file/patch (the owner reviews diffs and can roll back).',
-    team ? `Team roster: ${teamMd}; hand work to other members per skill agents-hub:team-coordination only when it needs them.` : null,
+    first ? 'Agents Hub chat. Rules for goals, saved tools and file edits: skill agents-hub:hub-operating (load it once per session); reply with <hub-goals-update>/<hub-tools-update> only when they change.' : 'Hub state changed:',
+    state,
+    first && team ? `Team: ${teamMd}${shared ? `; shared team space ${shared}` : ''}; skill agents-hub:team-coordination when work needs other members.` : null,
     '</hub-goals>'
-  ].filter(Boolean).join('\n')
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+  return { block, key, sig: state }
 }
 
 const previewKey = (agent, path) => `${agent}::${path}`
@@ -2015,10 +2068,19 @@ async function sendMessage(agent, text, attachments = [], { display, truncateRow
     }
 
     setLive(agent, cur => ({ turn: cur.turn && cur.turn.active ? cur.turn : { ...newTurn(), phase: 'waiting' } }))
-    const withGoals = S.goals[agent] && S.goals[agent].status === 'ready' ? `${prompt}\n\n${goalsBlock(agent)}` : prompt
+    if (Number.isInteger(truncateRowId)) {
+      delete hubSentMap()[`${agent}:${runtime}`] // the cut may remove the turn that carried the Hub state
+    }
+
+    const hub = S.goals[agent] && S.goals[agent].status === 'ready' ? goalsBlock(agent, runtime) : null
+    const withGoals = hub && hub.block ? `${prompt}\n\n${hub.block}` : prompt
     const cut = Number.isInteger(truncateRowId) ? { confirm_truncate: true, truncate_before_row_id: truncateRowId, confirm_deep_truncate: true } : {}
 
     await rp(agent, 'prompt.submit', { session_id: runtime, text: withGoals, ...cut })
+
+    if (hub && hub.block) {
+      rememberHubSent(hub.key, hub.sig) // only once the agent has it
+    }
 
     if (cut.confirm_truncate) {
       // The cut rows are now inactive server-side: drop every cached page so they disappear.
@@ -3039,6 +3101,110 @@ function GoalsOverview({ s }) {
   )
 }
 
+// One row per member: what it is working on right now, what blocks it and on whom, what waits in its queue.
+const TEAM_RANK = { working: 0, blocked: 1, review: 2, queued: 3, idle: 4 }
+
+function teamRows(s, v) {
+  const tasks = (s.tasks && s.tasks.data && s.tasks.data.tasks) || v.tasks || []
+
+  return v.agents
+    .map(a => {
+      const mine = tasks.filter(t => t.assignee === a.id)
+      const running = mine.filter(t => t.status === 'running')
+      const blocked = mine.filter(t => t.status === 'blocked')
+      const review = mine.filter(t => t.status === 'review')
+      const queued = mine.filter(t => ['todo', 'ready', 'triage', 'scheduled'].includes(t.status))
+      const state = running.length ? 'working' : blocked.length ? 'blocked' : review.length ? 'review' : queued.length ? 'queued' : 'idle'
+
+      return { a, running, blocked, review, queued, state }
+    })
+    .sort((x, y) => TEAM_RANK[x.state] - TEAM_RANK[y.state])
+}
+
+function TeamNow({ s, v }) {
+  const rows = teamRows(s, v)
+  const working = rows.filter(r => r.state === 'working').length
+  const needOwner = rows.reduce((n, r) => n + r.blocked.filter(t => t.waiting_on === 'owner').length, 0)
+
+  if (!rows.length) {
+    return null
+  }
+
+  return h(
+    SectionCard,
+    { title: `Team now · ${working} working${needOwner ? ` · ${needOwner} waiting on you` : ''}`, icon: 'organization', onMore: () => setUi({ tab: 'tasks' }) },
+    h(
+      'ul',
+      { className: 'ah-rows ah-team-now' },
+      rows.map(({ a, running, blocked, review, queued, state }) => {
+        const t = running[0] || blocked[0] || review[0] || null
+        const line =
+          state === 'working'
+            ? `Working on: ${t.title}${t.progress ? ` · ${t.progress.text}` : ''}${t.updated_at ? ` · ${relTime(t.updated_at, s.now)}` : ''}${running.length > 1 ? ` (+${running.length - 1})` : ''}`
+            : state === 'blocked'
+              ? `Blocked: ${t.title} · waiting on ${waitingLabel(s, t.waiting_on)}`
+              : state === 'review'
+                ? `In review: ${t.title}`
+                : state === 'queued'
+                  ? `${queued.length} task${queued.length > 1 ? 's' : ''} queued`
+                  : 'Idle'
+
+        return h(
+          'li',
+          { key: a.id },
+          h(
+            'button',
+            { type: 'button', className: cx('ah-row ah-state', `is-${state}`), title: t && t.block_reason ? t.block_reason : line, onClick: () => setUi({ agent: a.id, tab: 'chat', handoff: null, sideFile: null }) },
+            h('span', { className: cx('ah-live-av', state === 'working' && 'is-on') }, h(Avatar, { id: a.id, name: a.name, size: 32, status: a.status, mood: state === 'working' ? 'working' : state === 'blocked' ? 'waiting' : 'happy' })),
+            h('span', { className: 'ah-row-body' }, h('span', { className: 'ah-row-title' }, a.name), h('span', { className: 'ah-row-sub' }, line)),
+            h(StatusChip, { status: state === 'working' ? 'running' : state })
+          )
+        )
+      })
+    )
+  )
+}
+
+function SharedSpace({ s }) {
+  const d = s.shared && s.shared.data
+
+  if (!d) {
+    return null
+  }
+
+  const notes = String(d.notes || '')
+    .split('\n')
+    .filter(l => /^\s*-\s/.test(l))
+    .slice(0, 6)
+  const files = (d.files || []).slice(0, 6)
+  const open = async p => {
+    const os = C && C.os
+
+    if (os && typeof os.openExternal === 'function') {
+      await os.openExternal(p)
+    }
+  }
+
+  return h(
+    SectionCard,
+    { title: 'Shared team space', icon: 'folder-library' },
+    h('p', { className: 'ah-row-sub' }, 'Team memory and files every member reads and writes: ', h('code', { className: 'ah-mono' }, d.dir)),
+    notes.length
+      ? h('ul', { className: 'ah-shared-notes' }, notes.map((l, i) => h('li', { key: i }, l.replace(/^\s*-\s*/, ''))))
+      : h('p', { className: 'ah-side-empty' }, 'No team notes yet. Members add one line per durable fact to NOTES.md.'),
+    files.length
+      ? h(
+          'ul',
+          { className: 'ah-rows' },
+          files.map(f =>
+            h('li', { key: f.path }, h('button', { type: 'button', className: 'ah-row ah-state', onClick: () => void open(f.path), title: f.path }, h(Icon, { name: 'file', size: 16 }), h('span', { className: 'ah-row-body' }, h('span', { className: 'ah-row-title' }, f.name), h('span', { className: 'ah-row-sub' }, relTime(f.modified_at, s.now)))))
+          )
+        )
+      : null,
+    h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => void open(d.notes_path) }, h(Icon, { name: 'link-external', size: 14 }), ' Open NOTES.md')
+  )
+}
+
 function Overview({ s, v }) {
   const day = s.now / 1000 - 86400
   const active = v.agents.filter(a => a.status === 'active').length
@@ -3069,7 +3235,9 @@ function Overview({ s, v }) {
       h(Tile, { icon: 'checklist', label: 'Open tasks', value: String(open), hint: `${v.tasks.length} tasks in total`, onClick: () => go('tasks') }),
       h(Tile, { icon: 'git-compare', label: 'Changed files', value: String(fileCount), hint: `${v.repos.length} repositories`, onClick: () => go('changes') })
     ),
+    h(TeamNow, { s, v }),
     h(GoalsOverview, { s }),
+    h(SharedSpace, { s }),
     h(
       'div',
       { className: 'ah-grid-3' },
@@ -5914,7 +6082,8 @@ function PeersSection({ s, agent, data }) {
               { className: 'ah-peer-name' },
               p.name,
               h('span', { className: cx('ah-peer-dir', p.direction === 'out' ? 'is-out' : 'is-in') }, p.direction === 'out' ? 'was given work' : 'gave this agent work'),
-              p.count > 1 ? h('span', { className: 'ah-peer-count' }, `${p.count} times`) : null
+              p.count > 1 ? h('span', { className: 'ah-peer-count' }, `${p.count} times`) : null,
+              !active && p.blocked > 0 ? h('span', { className: 'ah-peer-count is-blocked', title: 'A shared Kanban card is blocked: open the Tasks tab to see who it waits on' }, 'Blocked') : null
             ),
             h('span', { className: 'ah-peer-task', title: p.title }, p.title),
             p.doing
@@ -6339,6 +6508,24 @@ function Works({ s, v }) {
 
 /* ───────────────────────── tasks ───────────────────────── */
 
+// Who has to act on a blocked card: the owner, the agent that created it, or nobody yet (parents / retry).
+function waitingLabel(s, w) {
+  return w === 'owner' ? 'you (owner)' : w === 'parents' ? 'earlier tasks' : w === 'retry' ? 'automatic retry' : agentName(s, w)
+}
+
+function TaskBlock({ s, t }) {
+  return h(
+    'div',
+    { className: cx('ah-task-block', t.waiting_on === 'owner' && 'is-owner') },
+    h('span', { className: 'ah-task-block-head' }, h(Icon, { name: 'warning', size: 12 }), ` Waiting on ${waitingLabel(s, t.waiting_on)}`, t.blocked_at ? ` · ${relTime(t.blocked_at, s.now)}` : ''),
+    t.block_reason ? h('span', { className: 'ah-task-block-why', title: t.block_reason }, t.block_reason) : null
+  )
+}
+
+function TaskNote({ s, c }) {
+  return h('p', { className: 'ah-task-note', title: c.text }, h('b', null, `${agentName(s, c.author)}: `), c.text, c.at ? h('time', { className: 'ah-side-time' }, ` · ${relTime(c.at, s.now)}`) : null)
+}
+
 function Tasks({ s, v }) {
   const items = v.tasks
 
@@ -6393,11 +6580,14 @@ function Tasks({ s, v }) {
                     t.branch_name ? h(Chip, { tone: 'flat', icon: 'git-branch', title: t.workspace_path || undefined }, t.branch_name) : null,
                     num(t.comments) > 0 ? h(Chip, { tone: 'flat', icon: 'comment' }, `${t.comments} comments`) : null
                   ),
+                  t.status === 'blocked' ? h(TaskBlock, { s, t }) : null,
+                  t.status === 'running' && t.progress ? h('p', { className: 'ah-task-note is-progress', title: t.progress.text }, h(Icon, { name: 'pulse', size: 12 }), ` ${t.progress.text}`) : null,
+                  t.last_comment ? h(TaskNote, { s, c: t.last_comment }) : null,
                   h(
                     'footer',
                     { className: 'ah-task-foot' },
                     t.assignee ? h('span', { className: 'ah-inline-agent' }, h(Avatar, { id: t.assignee, name: agentName(s, t.assignee), size: 24 }), h('span', null, agentName(s, t.assignee))) : h('span', { className: 'ah-row-sub' }, 'Unassigned'),
-                    h('time', { className: 'ah-row-sub', title: absTime(t.created_at) }, relTime(t.completed_at || t.started_at || t.created_at, s.now))
+                    h('time', { className: 'ah-row-sub', title: absTime(t.updated_at || t.created_at) }, t.status === 'running' && t.updated_at ? `updated ${relTime(t.updated_at, s.now)}` : relTime(t.completed_at || t.started_at || t.created_at, s.now))
                   )
                 )
               )
@@ -8039,6 +8229,12 @@ const CSS = `
 .ah-root .ah-login{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--ah-outline-variant)}
 .ah-root .ah-login-step{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
 .ah-root .ah-login-step .ah-input{flex:1;min-width:220px}
+.ah-root .ah-task-block{display:flex;flex-direction:column;gap:2px;margin:6px 0;padding:6px 8px;border-radius:var(--ah-r-sm);background:color-mix(in srgb,var(--ah-warn,#c80) 12%,transparent);font-size:12px}
+.ah-root .ah-task-block.is-owner{background:color-mix(in srgb,var(--ah-err,#c33) 14%,transparent)}
+.ah-root .ah-task-block-head{font-weight:600}
+.ah-root .ah-task-block-why,.ah-root .ah-task-note{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.ah-root .ah-task-note{margin:4px 0;font-size:12px;opacity:.85}
+.ah-root .ah-shared-notes{margin:6px 0;padding-left:18px;font-size:12.5px}
 .ah-root .ah-login-link{flex-basis:100%;font-size:12px;padding:4px 8px;border-radius:var(--ah-r-sm);background:var(--ah-surface-highest);user-select:all;word-break:break-all}
 .ah-root .ah-login-code{font-family:var(--ah-mono);font-size:18px;font-weight:700;letter-spacing:.12em;padding:2px 10px;border-radius:var(--ah-r-sm);background:var(--ah-surface-highest)}
 .ah-root .ah-login-log pre{max-height:160px;overflow:auto;font-size:11px;margin:4px 0 0;white-space:pre-wrap}

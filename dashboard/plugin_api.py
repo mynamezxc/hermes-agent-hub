@@ -383,12 +383,15 @@ def _find_owner(session_id: str, hint: str) -> Optional[str]:
 
 
 STALE_S = 3 * 3600  # an open session with no activity for this long is not running any more
+# A worker killed mid-run (owner restart, kill, crash) never writes ended_at: an open session that has been
+# silent this long is shown as stopped, not "Working" (live turns touch last_activity_at every tool call).
+RUN_IDLE_S = 30 * 60
 
 
 def _session_status(row: dict[str, Any]) -> str:
     if row.get("ended_at") is None:
         last = _num(row.get("last_activity_at")) or _num(row.get("started_at"))
-        return "stopped" if last is not None and time.time() - last > STALE_S else "running"
+        return "stopped" if last is not None and time.time() - last > RUN_IDLE_S else "running"
     reason = (row.get("end_reason") or "").lower()
     return "failed" if any(k in reason for k in ("error", "fail", "crash", "orphan", "timeout")) else "done"
 
@@ -512,6 +515,16 @@ def _async_convs(profile: str) -> list[dict[str, Any]]:
     return out
 
 
+# Only a card a worker is executing is "running"; a queued, blocked or in-review card is not anyone working.
+KANBAN_CONV_STATUS = {"running": "running", "done": "done", "archived": "done", "blocked": "blocked",
+                      "review": "review", "todo": "queued", "ready": "queued", "triage": "queued",
+                      "scheduled": "queued"}
+
+
+def _kanban_conv_status(status: Any) -> str:
+    return KANBAN_CONV_STATUS.get(str(status or ""), "queued")
+
+
 def _kanban_convs() -> list[dict[str, Any]]:
     db = _kanban_db()
     rows = query(db, "SELECT t.id, t.title, t.assignee, t.created_by, t.status, t.created_at, t.completed_at, "
@@ -526,7 +539,7 @@ def _kanban_convs() -> list[dict[str, Any]]:
         assignee = r.get("assignee")
         if not (r["authors"] > 1 or (assignee and author and assignee != author)):
             continue
-        status = {"done": "done", "archived": "done"}.get(r.get("status") or "", "running")
+        status = _kanban_conv_status(r.get("status"))
         out.append({
             "id": f"kanban:{r['id']}", "profile": "kanban", "session_id": r["id"],
             "from_agent": author or "unknown", "to_agent": assignee or "unassigned", "kind": "kanban",
@@ -898,18 +911,71 @@ def works() -> dict[str, Any]:
 def tasks(limit: int = Query(500, ge=1, le=2000)) -> dict[str, Any]:
     db = _kanban_db()
     ccount = {r["task_id"]: r["n"] for r in query(db, "SELECT task_id, COUNT(*) AS n FROM task_comments GROUP BY task_id")}
+    # Who is doing what and how far: the newest event of each card (heartbeats, comments, blocks…), the
+    # newest comment (the team's conversation on the card) and why a blocked card waits, and on whom.
+    last_ev = {r["task_id"]: _num(r["t"]) for r in query(db, "SELECT task_id, MAX(created_at) AS t FROM task_events GROUP BY task_id")}
+    blocks = {r["task_id"]: r for r in query(
+        db, "SELECT task_id, payload, MAX(created_at) AS t FROM task_events WHERE kind = 'blocked' GROUP BY task_id")}
+    last_cm = {r["task_id"]: r for r in query(
+        db, "SELECT task_id, author, body, MAX(created_at) AS t FROM task_comments GROUP BY task_id")}
+    beats = {r["task_id"]: r for r in query(
+        db, "SELECT task_id, payload, MAX(created_at) AS t FROM task_events WHERE kind = 'heartbeat' "
+            "AND payload IS NOT NULL AND payload != 'null' GROUP BY task_id")}
     rows = query(db, "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,))
     out, counts = [], {}
     for r in rows:
         wp = r.get("workspace_path")
-        out.append({"id": r["id"], "title": _clip(r.get("title"), 200), "status": r.get("status"),
-                    "priority": r.get("priority") or 0, "assignee": r.get("assignee"),
-                    "created_by": r.get("created_by"), "created_at": _num(r.get("created_at")),
-                    "started_at": _num(r.get("started_at")), "completed_at": _num(r.get("completed_at")),
-                    "workspace_path": None if (wp and is_denied(wp)) else wp, "branch_name": r.get("branch_name"),
-                    "comments": int(ccount.get(r["id"], 0))})
+        item = {"id": r["id"], "title": _clip(r.get("title"), 200), "status": r.get("status"),
+                "priority": r.get("priority") or 0, "assignee": r.get("assignee"),
+                "created_by": r.get("created_by"), "created_at": _num(r.get("created_at")),
+                "started_at": _num(r.get("started_at")), "completed_at": _num(r.get("completed_at")),
+                "workspace_path": None if (wp and is_denied(wp)) else wp, "branch_name": r.get("branch_name"),
+                "comments": int(ccount.get(r["id"], 0)),
+                "heartbeat_at": _num(r.get("last_heartbeat_at")), "updated_at": last_ev.get(r["id"])}
+        note = _beat_note(beats.get(r["id"]))
+        if note:
+            item["progress"] = {"text": note, "at": _num(beats[r["id"]].get("t"))}
+        cm = last_cm.get(r["id"])
+        if cm:
+            item["last_comment"] = {"author": cm.get("author"), "at": _num(cm.get("t")),
+                                    "text": redact(_clip(" ".join(str(cm.get("body") or "").split()), 220))}
+        if r.get("status") == "blocked":
+            item.update(_block_info(r, blocks.get(r["id"])))
+        out.append(item)
         counts[r.get("status")] = counts.get(r.get("status"), 0) + 1
     return {"tasks": out, "counts": counts}
+
+
+def _beat_note(ev: Optional[dict[str, Any]]) -> str:
+    """The worker's latest ``kanban_heartbeat`` note: its own words for how far it is."""
+    if not ev:
+        return ""
+    try:
+        note = (json.loads(ev.get("payload") or "{}") or {}).get("note")
+    except (ValueError, AttributeError):
+        return ""
+    return redact(_clip(" ".join(str(note or "").split()), 200))
+
+
+def _block_info(task: dict[str, Any], ev: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Why a card is blocked and who has to act: ``needs_input`` waits on the card's creator (the agent who
+    can answer it, else the owner); ``capability`` on the owner; ``dependency`` on its parents."""
+    try:
+        reason = (json.loads(ev.get("payload") or "{}") or {}).get("reason") if ev else None
+    except (ValueError, AttributeError):
+        reason = None
+    kind = task.get("block_kind") or ""
+    creator = task.get("created_by") or ""
+    if kind == "dependency":
+        waiting = "parents"
+    elif kind == "needs_input" and creator and creator != task.get("assignee") and creator in set(list_agents()):
+        waiting = creator
+    elif kind == "transient":
+        waiting = "retry"
+    else:
+        waiting = "owner"
+    return {"block_kind": kind or None, "block_reason": redact(_clip(" ".join(str(reason or "").split()), 400)) or None,
+            "blocked_at": _num(ev.get("t")) if ev else None, "waiting_on": waiting}
 
 
 # ───────────────────────────────── changes ───────────────────────────────────
@@ -1476,11 +1542,14 @@ def chat_peers(agent: str, now: float, limit: int = 12) -> list[dict[str, Any]]:
             out[other]["count"] += 1
             if c["status"] == "running":
                 out[other]["running"] += 1
+            if c["status"] == "blocked":
+                out[other]["blocked"] += 1
             continue
         out[other] = {"agent": other, "name": _role(other)[0], "direction": "out" if c["from_agent"] == agent else "in",
                       "title": c["title"], "status": c["status"], "at": c["started_at"], "kind": c["kind"],
                       "profile": c["profile"], "session_id": c["session_id"], "count": 1,
-                      "running": 1 if c["status"] == "running" else 0}
+                      "running": 1 if c["status"] == "running" else 0,
+                      "blocked": 1 if c["status"] == "blocked" else 0}
     peers = sorted(out.values(), key=lambda p: (p["running"] > 0, p["at"] or 0), reverse=True)[:limit]
     for p in peers:
         p.update(_activity(p["agent"], now))
@@ -2453,8 +2522,63 @@ def command_output(id: str = Query(...)) -> dict[str, Any]:
 # that, so owners can edit it. ``TEAM.md`` next to it is the same roster for agents to read when
 # they coordinate work (regenerated whenever the roster changes).
 
-SETUP_VERSION = 2
+SETUP_VERSION = 3
 OWNER_LABEL = "Owner"
+
+# ─────────────── shared team space: team memory + files every member reads and writes ───────────────
+# Each agent keeps its own memory (Hermes memory, in its profile) and its own skills. What the whole team
+# must know lives here once, instead of being pasted into every task or chat message: members read the
+# small NOTES.md index when they start work and open only the files it points to.
+SHARED_README = """# Shared team space (Agents Hub)
+
+Every member of the team reads and writes here. Keep it small: this is an index, not an archive.
+
+- `NOTES.md`: team memory. One line per durable fact (decision, convention, where something lives, who owns
+  what). Newest first, dated, signed with your agent id. Remove lines that stop being true.
+- `files/`: files you hand to another member (drafts, data, evidence). Name them `<YYYY-MM-DD>-<topic>.<ext>` and
+  mention the path in the Kanban card comment instead of pasting the content.
+- Never put secrets, passwords, tokens or customers' personal data here.
+
+Your own experience (what worked, pitfalls, preferences of the owner for your kind of work) goes in your own
+memory and skills, not here.
+"""
+SHARED_NOTES = """# Team notes
+
+<!-- One line per fact: `- YYYY-MM-DD <agent>: <fact> (<path or card id>)`. Newest first. -->
+"""
+
+
+def shared_dir() -> Path:
+    return _hub_dir("shared")
+
+
+def ensure_shared() -> Path:
+    """Create the shared space once; never overwrite what the team wrote."""
+    d = shared_dir()
+    (d / "files").mkdir(parents=True, exist_ok=True)
+    for name, text in (("README.md", SHARED_README), ("NOTES.md", SHARED_NOTES)):
+        p = d / name
+        if not p.exists():
+            p.write_text(text, encoding="utf-8")
+    return d
+
+
+@router.get("/shared")
+def shared() -> dict[str, Any]:
+    """Team notes and shared files (read-only view for the Hub)."""
+    d = ensure_shared()
+    notes = d / "NOTES.md"
+    try:
+        text = notes.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    files = []
+    for p in sorted((d / "files").rglob("*"), key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True)[:200]:
+        if p.is_file() and not is_denied(str(p)):
+            st = p.stat()
+            files.append({"path": p.as_posix(), "name": p.relative_to(d / "files").as_posix(), "size": st.st_size,
+                          "modified_at": st.st_mtime})
+    return {"dir": d.as_posix(), "notes_path": notes.as_posix(), "notes": redact(text[-20000:]), "files": files}
 
 
 def _team_path() -> Path:
@@ -2505,6 +2629,8 @@ def _write_team_md(team: dict[str, dict[str, Any]]) -> None:
         "",
         "Generated by Agents Hub from `team.json` — edit the team in the Hub (Settings tab) rather than here.",
         "Hand work to the member whose role/capabilities fit; see the `agents-hub:team-coordination` skill.",
+        f"Shared team space: `{(root_home() / 'agents-hub' / 'shared').as_posix()}` (`NOTES.md` = team memory, "
+        "`files/` = files handed between members). Your own experience goes in your own memory and skills.",
         "",
         "| id | name | role | reports to | model | good at |",
         "|---|---|---|---|---|---|",
@@ -2540,12 +2666,13 @@ def ensure_team() -> dict[str, dict[str, Any]]:
 
 
 def ensure_setup(force: bool = False) -> dict[str, Any]:
-    """First-run (or forced) setup: team roster + TEAM.md + setup marker. Idempotent and cheap."""
+    """First-run (or forced) setup: team roster + TEAM.md + shared team space + setup marker. Idempotent and cheap."""
     marker = _hub_dir("") / "setup.json"
     state = _read_json(marker, {})
     team = ensure_team()
     if force or state.get("version") != SETUP_VERSION:
         _write_team_md(team)
+        ensure_shared()
         state = {"version": SETUP_VERSION, "at": time.time(), "agents": len(team)}
         _write_json(marker, state)
     return state
@@ -2578,7 +2705,8 @@ def team_get() -> dict[str, Any]:
     state = ensure_setup()
     team = load_team()
     return {"agents": [{"id": a, **team.get(a, {})} for a in list_agents()], "setup": state,
-            "team_md": (_hub_dir("") / "TEAM.md").as_posix(), "skills": _plugin_skills()}
+            "team_md": (_hub_dir("") / "TEAM.md").as_posix(), "shared_dir": shared_dir().as_posix(),
+            "skills": _plugin_skills()}
 
 
 @router.put("/team/{agent}")

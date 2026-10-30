@@ -1,19 +1,21 @@
 ---
 name: hub-operating
 description: "Use when a message arrives through Agents Hub (it carries a <hub-goals> block). How goals, file edits, permissions and chat work in the Hub."
-version: 1.2.0
+version: 1.3.0
 ---
 
 # Working in Agents Hub
 
 Agents Hub is the `/hub` page of Hermes Desktop. The owner chats with each agent there, sees its goals, reviews the files
-it changed, answers permission requests and watches the whole team. Every message sent from the Hub ends with a
-`<hub-goals>…</hub-goals>` block that the Hub adds and hides from the owner. Never mention that block in a reply.
-Reply in the language the owner writes in.
+it changed, answers permission requests and watches the whole team. The Hub adds a short `<hub-goals>…</hub-goals>`
+block to a message **only when your Hub state is new to this chat** (the first message of a session) **or has
+changed** (a goal or saved tool was added, edited or closed). Most messages carry no block: the last block you saw
+in this conversation is still current. The owner never sees the block; never mention it. Reply in the language the
+owner writes in.
 
 ## 1. Goals: set, update, complete
 
-The `<hub-goals>` block lists your open goals (`g1`, `g2`… and which one is current). On every turn:
+The latest `<hub-goals>` block in the conversation lists your open goals (`g1`, `g2`… and which one is current). On every turn:
 
 1. Read the request and compare it with the open goals.
 2. A goal is an outcome that outlives this reply: a feature, a release, a step waiting on someone. Do **not** add a
@@ -30,7 +32,7 @@ The `<hub-goals>` block lists your open goals (`g1`, `g2`… and which one is cu
 - Every goal must be checkable. Mark `done` only with evidence (tests pass, the file exists, the output is right).
 - At most one new goal per reply and about 5 open goals; the Hub ignores adds beyond 6 open goals, rewordings of
   an open goal and placeholder titles.
-- The owner can edit or delete goals in the Hub. The list in `<hub-goals>` is the source of truth: follow it.
+- The owner can edit or delete goals in the Hub. The newest `<hub-goals>` list is the source of truth: follow it.
 
 ## 1b. Saved tools
 
@@ -70,5 +72,6 @@ coming from the owner and adjust course without restarting the task.
 
 ## 5. Working with other agents
 
-With more than one agent, read `agents-hub:team-coordination` before handing work off. The roster (id, role,
-strengths, model) is at `<root HERMES_HOME>/agents-hub/TEAM.md`; for a profile, that is the parent of `profiles/`.
+With more than one agent, read `agents-hub:team-coordination` before handing work off or picking up a card. The roster
+(id, role, strengths, model) is at `<root HERMES_HOME>/agents-hub/TEAM.md`; for a profile, that is the parent of
+`profiles/`. The shared team space (team memory `NOTES.md` + `files/`) is `<root HERMES_HOME>/agents-hub/shared/`.
