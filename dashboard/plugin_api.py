@@ -2673,11 +2673,14 @@ def setup_run() -> dict[str, Any]:
 
 HUB_PROVIDERS = ("openai-codex", "anthropic")
 PROVIDER_LABEL = {"openai-codex": "Codex", "anthropic": "Claude", "claude-code": "Claude Code", "nous": "Nous Portal"}
-USAGE_TTL_S = 10 * 60          # a fresh snapshot is reused this long (usage moves slowly)
-USAGE_RETRY_S = 90             # after a failed fetch, wait this long before trying again
+USAGE_TTL_S = 2 * 60           # a fresh snapshot is reused this long (the owner watches it during heavy runs)
+USAGE_RETRY_S = 60             # after a failed fetch, wait this long before trying again
 LOGIN_TTL_S = 15 * 60
 
 _usage_cache: dict[tuple[str, str], dict[str, Any]] = {}
+# Bumped on every login for a provider: a fetch that started before the login must not land the old
+# account's numbers. Profiles share one login, so a login clears the provider for EVERY agent.
+_usage_gen: dict[str, int] = {}
 _usage_lock = __import__("threading").Lock()
 _logins: dict[str, dict[str, Any]] = {}
 
@@ -2774,6 +2777,8 @@ def _start_cli_login(agent: str, provider: str) -> dict[str, Any]:
         code = proc.wait()
         sess["status"] = "approved" if code == 0 else "error"
         sess["exit_code"] = code
+        if code == 0:
+            _usage_forget(provider)
 
     threading.Thread(target=pump, daemon=True).start()
     _logins[sid] = sess
@@ -2831,7 +2836,7 @@ async def provider_login_poll(sid: str) -> dict[str, Any]:
         except HTTPException as e:
             sess["status"], sess["error"] = "error", str(e.detail)
     if sess["status"] == "approved":
-        _usage_forget(sess["agent"], sess["provider"])
+        _usage_forget(sess["provider"])
     return _login_public(sess)
 
 
@@ -2861,9 +2866,23 @@ def provider_login_cancel(sid: str) -> dict[str, Any]:
     return {"ok": True}
 
 
-def _usage_forget(agent: str, provider: str) -> None:
+def _usage_forget(provider: str) -> None:
+    """A new login replaces the account for every agent (profiles share the credential pool)."""
     with _usage_lock:
-        _usage_cache.pop((agent, provider), None)
+        _usage_gen[provider] = _usage_gen.get(provider, 0) + 1
+        for key in [k for k in _usage_cache if k[1] == provider]:
+            _usage_cache.pop(key, None)
+
+
+def _account_sig(provider: str) -> str:
+    """Which login the numbers belong to: the pool entry ids in use order (ids only, never a secret).
+    It changes when the owner re-authorizes anywhere (Hub, Settings, CLI), so old numbers are dropped."""
+    try:
+        from agent.credential_pool import load_pool
+        entries, _pending = load_pool(provider)._available_entries(clear_expired=False, refresh=False)
+        return ",".join(str(getattr(e, "id", "")) for e in entries)
+    except Exception:
+        return ""
 
 
 def _snapshot_dict(snap: Any) -> Optional[dict[str, Any]]:
@@ -2904,23 +2923,31 @@ def _fetch_usage_sync(agent: str, provider: str) -> dict[str, Any]:
             if cc.get("logged_in"):
                 status = {**cc, "via": "claude-code"}
         snap = None
+        sig = _account_sig(provider)
         if status.get("logged_in"):
             from agent.account_usage import fetch_account_usage
             snap = fetch_account_usage(provider, read_only=True)
-    return {"status": status, "usage": _snapshot_dict(snap)}
+    return {"status": status, "usage": _snapshot_dict(snap), "sig": sig}
 
 
 def _refresh_usage(agent: str, provider: str) -> None:
     key = (agent, provider)
+    gen = _usage_gen.get(provider, 0)
     try:
         fresh = _fetch_usage_sync(agent, provider)
         ok = fresh["usage"] is not None or not fresh["status"].get("logged_in")
         with _usage_lock:
+            if _usage_gen.get(provider, 0) != gen:  # a login landed meanwhile: these numbers may be the old account's
+                _usage_cache.pop(key, None)
+                return
             prev = _usage_cache.get(key) or {}
+            if prev and prev.get("sig") != fresh.get("sig"):  # another account now: never keep its numbers
+                prev = {}
             if ok:
                 _usage_cache[key] = {**fresh, "at": time.time(), "error": None, "busy": False}
             else:  # keep the last good numbers; remember the failure
-                _usage_cache[key] = {**prev, "status": fresh["status"], "at": prev.get("at"), "failed_at": time.time(),
+                _usage_cache[key] = {**prev, "status": fresh["status"], "sig": fresh.get("sig"), "at": prev.get("at"),
+                                     "failed_at": time.time(),
                                      "error": "Could not fetch usage right now (keeping the last numbers).", "busy": False}
     except Exception as e:
         with _usage_lock:

@@ -799,6 +799,51 @@ class TeamSetupUsageTest(unittest.TestCase):
         self.m.usage("default", wait=5)  # fresh again: served from cache
         self.assertEqual(len(calls), 4)
 
+    def _stale_all(self):
+        for k in list(self.m._usage_cache):
+            self.m._usage_cache[k]["at"] -= self.m.USAGE_TTL_S + 1
+
+    def test_usage_drops_old_account_numbers_after_reauthorize(self):
+        """Old account at 100% + new login whose first fetch fails: never keep showing 100%."""
+        state = {"sig": "old", "fail": False}
+
+        def fake(agent, provider):
+            if state["fail"]:
+                return {"status": {"logged_in": True}, "usage": None, "sig": state["sig"]}
+            return {"status": {"logged_in": True}, "sig": state["sig"],
+                    "usage": {"windows": [{"label": "Session", "used_percent": 100}]}}
+
+        self.m._fetch_usage_sync = fake
+        r = self.m.usage("default", wait=5)
+        self.assertEqual(r["providers"][1]["usage"]["windows"][0]["used_percent"], 100)
+        state.update(sig="new", fail=True)  # re-authorized elsewhere (Settings/CLI); usage endpoint busy
+        self._stale_all()
+        r = self.m.usage("default", wait=5)
+        self.assertTrue(all(p["usage"] is None for p in r["providers"]), r)
+
+    def test_usage_login_clears_every_agent_and_late_fetch_is_dropped(self):
+        import threading
+        self.m._usage_cache[("default", "anthropic")] = {"at": time.time(), "usage": {"windows": [{"used_percent": 100}]}}
+        self.m._usage_cache[("qa", "anthropic")] = {"at": time.time(), "usage": {"windows": [{"used_percent": 100}]}}
+        self.m._usage_cache[("qa", "openai-codex")] = {"at": time.time(), "usage": {"windows": [{"used_percent": 7}]}}
+        go, started = threading.Event(), threading.Event()
+
+        def slow(agent, provider):  # a fetch that began before the login, with the old account's numbers
+            started.set()
+            go.wait(5)
+            return {"status": {"logged_in": True}, "sig": "x", "usage": {"windows": [{"used_percent": 100}]}}
+
+        self.m._fetch_usage_sync = slow
+        t = threading.Thread(target=self.m._refresh_usage, args=("default", "anthropic"))
+        t.start()
+        started.wait(5)
+        self.m._usage_forget("anthropic")  # login approved
+        self.assertNotIn(("qa", "anthropic"), self.m._usage_cache)
+        self.assertIn(("qa", "openai-codex"), self.m._usage_cache)
+        go.set()
+        t.join(5)
+        self.assertNotIn(("default", "anthropic"), self.m._usage_cache)
+
     def test_usage_answers_immediately_while_loading(self):
         import threading
         gate = threading.Event()

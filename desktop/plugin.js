@@ -27,7 +27,7 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.13'
+const PLUGIN_VERSION = '1.6.14'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
@@ -6757,7 +6757,7 @@ function HubPage() {
 
 // Usage is cached by the gateway for 10 minutes; the bar asks every 5 and never blanks: the last
 // good numbers stay on screen while a refresh runs or if one fails.
-const USAGE_POLL_MS = 5 * 60 * 1000
+const USAGE_POLL_MS = 60 * 1000  // the server caches 2 min, so this is cheap; numbers lag at most ~3 min
 const USAGE_RETRY_MS = 6000
 const LOGIN_POLL_MS = 3000
 const HUB_PROVIDER_IDS = ['openai-codex', 'anthropic']
@@ -6957,7 +6957,7 @@ function UsageChip({ p, now }) {
 
   const main = wins.slice(0, 2)
   const worst = wins.reduce((m, w) => Math.max(m, Number(w.used_percent) || 0), 0)
-  const stale = p.updated_at && now / 1000 - p.updated_at > 30 * 60
+  const stale = p.updated_at && now / 1000 - p.updated_at > 10 * 60
 
   return h(
     'span',

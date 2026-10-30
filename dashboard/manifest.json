@@ -3,7 +3,7 @@
   "label": "Agents Hub",
   "description": "Agents Hub: chat with, steer and coordinate every Hermes profile: goals, file changes with rollback, permission requests, running commands, scheduled jobs, team roster, provider logins and usage.",
   "icon": "Users",
-  "version": "1.6.13",
+  "version": "1.6.14",
   "tab": {
     "hidden": true
   },
