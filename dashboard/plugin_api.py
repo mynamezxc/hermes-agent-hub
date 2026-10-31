@@ -26,7 +26,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -2914,6 +2914,198 @@ def _use_new_login(sess: dict[str, Any]) -> None:
     _usage_forget(sess["provider"])
 
 
+# ───────────── automatic account switching (Claude/Codex accounts in the shared credential pool) ─────────────
+# Owner rule (31/10/2026): when the account in use runs out of its 5-hour or weekly limit, switch to the next
+# account; remove an account whose login is dead (refresh rejected); if the next one is out too, keep going
+# round until back at the first account; use the first account that still has both limits left.
+ROTATE_EVERY_S = 300      # background check period
+ROTATE_KICK_S = 60        # earliest re-check after the account in use showed a full window
+FULL_PCT = 99.5           # a window at/above this is used up
+ROTATION_LOG_MAX = 200
+_rotation_lock = threading.Lock()
+_rotation_state: dict[str, dict[str, Any]] = {}
+_rotation_thread: Optional[threading.Thread] = None
+
+
+def _rotation_enabled() -> bool:
+    return _read_json(_hub_dir("") / "settings.json", {}).get("auto_switch_accounts", True) is not False
+
+
+def _pool_entries(provider: str) -> list[Any]:
+    """The provider's pool, in use order (priority 0 first)."""
+    from agent.credential_pool import load_pool
+    return sorted(load_pool(provider).entries(), key=lambda e: (e.priority, e.id))
+
+
+def _entry_windows(provider: str, entry: Any) -> Optional[list[dict[str, Any]]]:
+    """One account's usage windows, read with THAT account's token (read-only: never rotates). None = unknown."""
+    from agent.account_usage import fetch_account_usage
+    snap = fetch_account_usage(provider, base_url=entry.runtime_base_url, api_key=entry.runtime_api_key,
+                               read_only=True, identity_id=entry.id)
+    d = _snapshot_dict(snap)
+    return (d or {}).get("windows") or None
+
+
+def _refresh_entry(provider: str, entry_id: str) -> tuple[Optional[Any], bool]:
+    """Refresh one account's tokens. Returns (fresh entry or None, dead): dead only when Hermes itself
+    recorded the login as terminally rejected, never on a network error."""
+    from agent.credential_pool import STATUS_DEAD, load_pool
+    pool = load_pool(provider)
+    try:
+        fresh = pool.try_refresh_matching(credential_id=entry_id)
+    except Exception:
+        fresh = None
+    if fresh is not None:
+        return fresh, False
+    after = next((e for e in load_pool(provider).entries() if e.id == entry_id), None)
+    return None, bool(after is not None and after.last_status == STATUS_DEAD)
+
+
+def _account_state(provider: str, entry: Any) -> dict[str, Any]:
+    """ok (both limits left) | full (5h or weekly used up) | dead (login rejected) | unknown."""
+    if getattr(entry, "last_status", None) == "dead":
+        return {"state": "dead"}
+    try:
+        wins = _entry_windows(provider, entry)
+    except Exception:
+        wins = None
+    if wins is None:  # expired token or a hiccup: refresh once, then read again
+        fresh, dead = _refresh_entry(provider, entry.id)
+        if dead:
+            return {"state": "dead"}
+        if fresh is not None:
+            try:
+                wins = _entry_windows(provider, fresh)
+            except Exception:
+                wins = None
+    if not wins:
+        return {"state": "unknown"}
+    full = [w for w in wins if isinstance(w.get("used_percent"), (int, float)) and w["used_percent"] >= FULL_PCT]
+    resets = [w.get("reset_at") for w in full if isinstance(w.get("reset_at"), (int, float))]
+    return {"state": "full" if full else "ok", "windows": wins, "reset_at": max(resets) if resets else None}
+
+
+def plan_rotation(entries: list[Any], state_of: Callable[[Any], dict[str, Any]]) -> dict[str, Any]:
+    """Pure decision: keep the account in use while it has both limits left; otherwise walk the others in pool
+    order (back round to the first) and use the first one with both limits left. Dead logins are removed."""
+    plan: dict[str, Any] = {"use": None, "remove": [], "states": {}}
+    if not entries:
+        return plan
+    cur = entries[0]
+    st = state_of(cur)
+    plan["states"][cur.id] = st["state"]
+    if st["state"] in ("ok", "unknown"):  # unknown = could not read it now: never switch on a hiccup
+        return plan
+    if st["state"] == "dead":
+        plan["remove"].append(cur.id)
+    for e in entries[1:]:
+        s = state_of(e)
+        plan["states"][e.id] = s["state"]
+        if s["state"] == "dead":
+            plan["remove"].append(e.id)
+        elif s["state"] == "ok":
+            plan["use"] = e.id
+            break
+    return plan
+
+
+def _log_rotation(provider: str, plan: dict[str, Any], applied: dict[str, Any]) -> None:
+    path = _hub_dir("") / "account-rotation.jsonl"
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": time.time(), "provider": provider, **plan, **applied}) + "\n")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) > ROTATION_LOG_MAX * 2:
+            path.write_text("\n".join(lines[-ROTATION_LOG_MAX:]) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def rotate_accounts(provider: str) -> dict[str, Any]:
+    """Check the account in use and switch/remove per the owner's rule. Ids only, never a secret."""
+    if not _rotation_lock.acquire(blocking=False):
+        return {"provider": provider, "busy": True}
+    try:
+        entries = _pool_entries(provider)
+        plan = plan_rotation(entries, lambda e: _account_state(provider, e))
+        applied: dict[str, Any] = {"removed": [], "switched_to": None}
+        for rid in plan["remove"]:
+            if _run_hermes(["auth", "remove", provider, rid]) == 0:
+                applied["removed"].append(rid)
+        if plan["use"] and _run_hermes(["auth", "priority", provider, plan["use"], "0"]) == 0:
+            applied["switched_to"] = plan["use"]
+        if applied["removed"] or applied["switched_to"]:
+            _usage_forget(provider)
+            _log_rotation(provider, plan, applied)
+        before = entries[0].id if entries else None
+        all_out = bool(entries) and not plan["use"] and plan["states"].get(before) != "ok"
+        _rotation_state[provider] = {"checked_at": time.time(), "in_use": applied["switched_to"] or before,
+                                     "accounts": len(entries) - len(applied["removed"]), "states": plan["states"],
+                                     "switched_to": applied["switched_to"], "removed": applied["removed"],
+                                     "all_used_up": all_out}
+        return {"provider": provider, **_rotation_state[provider]}
+    finally:
+        _rotation_lock.release()
+
+
+def _rotation_loop() -> None:
+    while True:
+        if _rotation_enabled():
+            for provider in HUB_PROVIDERS:
+                try:
+                    if len(_pool_entries(provider)) > 1:
+                        rotate_accounts(provider)
+                except Exception as e:  # never let the loop die
+                    _rotation_state[provider] = {"checked_at": time.time(), "error": redact(str(e))[:200]}
+        time.sleep(ROTATE_EVERY_S)
+
+
+def _ensure_rotation_thread() -> None:
+    global _rotation_thread
+    if _rotation_thread is None or not _rotation_thread.is_alive():
+        _rotation_thread = threading.Thread(target=_rotation_loop, name="agents-hub-account-rotation", daemon=True)
+        _rotation_thread.start()
+
+
+def _kick_rotation(provider: str, usage: Optional[dict[str, Any]]) -> None:
+    """The account in use just showed a used-up window: check now instead of waiting for the next round."""
+    wins = (usage or {}).get("windows") or []
+    if not _rotation_enabled() or not any(isinstance(w.get("used_percent"), (int, float))
+                                          and w["used_percent"] >= FULL_PCT for w in wins):
+        return
+    last = (_rotation_state.get(provider) or {}).get("checked_at") or 0
+    if time.time() - last >= ROTATE_KICK_S:
+        threading.Thread(target=rotate_accounts, args=(provider,), daemon=True).start()
+
+
+def _rotation_public(provider: str) -> Optional[dict[str, Any]]:
+    st = _rotation_state.get(provider)
+    if not st or st.get("error"):
+        return None
+    return {"accounts": st.get("accounts"), "checked_at": st.get("checked_at"), "switched_to": st.get("switched_to"),
+            "removed": len(st.get("removed") or []), "all_used_up": st.get("all_used_up"),
+            "states": list((st.get("states") or {}).values())}
+
+
+@router.get("/accounts/rotation")
+def accounts_rotation() -> dict[str, Any]:
+    _ensure_rotation_thread()
+    log = []
+    try:
+        for line in (_hub_dir("") / "account-rotation.jsonl").read_text(encoding="utf-8").splitlines()[-20:]:
+            log.append(json.loads(line))
+    except (OSError, ValueError):
+        pass
+    return {"enabled": _rotation_enabled(), "every_s": ROTATE_EVERY_S, "providers": _rotation_state, "log": log}
+
+
+@router.post("/accounts/{provider}/rotate")
+def accounts_rotate_now(provider: str) -> dict[str, Any]:
+    if provider not in HUB_PROVIDERS:
+        raise HTTPException(404, "unknown provider")
+    return rotate_accounts(provider)
+
+
 def _start_cli_login(agent: str, provider: str) -> dict[str, Any]:
     import threading
     argv = _hermes_argv() + ([] if agent == "default" else ["-p", agent]) + ["auth", "add", provider]
@@ -3113,6 +3305,8 @@ def _refresh_usage(agent: str, provider: str) -> None:
                 _usage_cache[key] = {**prev, "status": fresh["status"], "sig": fresh.get("sig"), "at": prev.get("at"),
                                      "failed_at": time.time(),
                                      "error": "Could not fetch usage right now (keeping the last numbers).", "busy": False}
+        if ok:
+            _kick_rotation(provider, fresh.get("usage"))
     except Exception as e:
         with _usage_lock:
             prev = _usage_cache.get(key) or {}
@@ -3129,8 +3323,8 @@ def _window_passed(entry: dict[str, Any], now: float) -> bool:
 def usage(agent: str = Query("default"), wait: float = Query(0.0, ge=0, le=20)) -> dict[str, Any]:
     """Claude + Codex usage for an agent's login. Answers from cache at once; a stale entry is
     refreshed in the background (single flight per agent/provider), so the UI never blocks."""
-    import threading
     _check_agent(agent)
+    _ensure_rotation_thread()
     now = time.time()
     threads = []
     for provider in HUB_PROVIDERS:
@@ -3154,5 +3348,6 @@ def usage(agent: str = Query("default"), wait: float = Query(0.0, ge=0, le=20)) 
             c = _usage_cache.get((agent, provider)) or {}
             out.append({"id": provider, "label": PROVIDER_LABEL[provider], "status": c.get("status"),
                         "usage": c.get("usage"), "updated_at": c.get("at"), "error": c.get("error"),
-                        "loading": bool(c.get("busy")) and not c.get("at")})
+                        "loading": bool(c.get("busy")) and not c.get("at"),
+                        "rotation": _rotation_public(provider)})
     return {"agent": agent, "providers": out, "ttl": USAGE_TTL_S}

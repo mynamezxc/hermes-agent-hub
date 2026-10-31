@@ -1460,3 +1460,78 @@ class TeamVisibilityTest(unittest.TestCase):
         self.assertIn("keep this", s["notes"])
         self.assertEqual([f["name"] for f in s["files"]], ["2026-10-31-x.md"])
         self.assertIn("agents-hub/shared", (self.home / "agents-hub" / "TEAM.md").read_text(encoding="utf-8"))
+
+
+class AccountRotationTest(unittest.TestCase):
+    """Owner rule: account in use out of its 5h/weekly limit -> next account; dead login -> removed; next also
+    out -> keep going round to the first; use the first account with both limits left."""
+
+    def setUp(self):
+        home = FIX / "rotation" / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        os.environ["HERMES_HOME"] = str(home)
+        spec = importlib.util.spec_from_file_location("agents_hub_api_rotation", API)
+        self.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.m)
+
+    @staticmethod
+    def entries(*ids):
+        from types import SimpleNamespace
+        return [SimpleNamespace(id=i, priority=n, last_status=None) for n, i in enumerate(ids)]
+
+    def plan(self, states, order=("a", "b", "c", "d")):
+        seen = []
+
+        def state_of(e):
+            seen.append(e.id)
+            return {"state": states[e.id]}
+        return self.m.plan_rotation(self.entries(*order), state_of), seen
+
+    def test_keep_account_with_both_limits_left(self):
+        p, seen = self.plan({"a": "ok", "b": "ok", "c": "ok", "d": "ok"})
+        self.assertEqual((p["use"], p["remove"], seen), (None, [], ["a"]))  # others are not even read
+
+    def test_used_up_switches_to_next_with_limits_left(self):
+        p, seen = self.plan({"a": "full", "b": "full", "c": "ok", "d": "ok"})
+        self.assertEqual(p["use"], "c")
+        self.assertEqual(seen, ["a", "b", "c"])
+
+    def test_dead_logins_are_removed_on_the_way(self):
+        p, _ = self.plan({"a": "dead", "b": "dead", "c": "full", "d": "ok"})
+        self.assertEqual(p["remove"], ["a", "b"])
+        self.assertEqual(p["use"], "d")
+
+    def test_all_used_up_stays_on_the_first(self):
+        p, seen = self.plan({"a": "full", "b": "full", "c": "full", "d": "unknown"})
+        self.assertIsNone(p["use"])
+        self.assertEqual(seen, ["a", "b", "c", "d"])
+
+    def test_unreadable_account_in_use_is_not_switched(self):
+        p, seen = self.plan({"a": "unknown", "b": "ok", "c": "ok", "d": "ok"})
+        self.assertEqual((p["use"], seen), (None, ["a"]))
+
+    def test_account_state_reads_windows_and_refreshes_expired(self):
+        from types import SimpleNamespace
+        e = SimpleNamespace(id="a", last_status=None)
+        self.m._entry_windows = lambda prov, ent: [{"label": "Session", "used_percent": 100, "reset_at": 9e9},
+                                                   {"label": "Weekly", "used_percent": 40}]
+        self.assertEqual(self.m._account_state("openai-codex", e)["state"], "full")
+        self.m._entry_windows = lambda prov, ent: [{"label": "Session", "used_percent": 20},
+                                                   {"label": "Weekly", "used_percent": 99}]
+        self.assertEqual(self.m._account_state("openai-codex", e)["state"], "ok")
+        self.m._entry_windows = lambda prov, ent: None  # token expired and the refresh was rejected
+        self.m._refresh_entry = lambda prov, i: (None, True)
+        self.assertEqual(self.m._account_state("openai-codex", e)["state"], "dead")
+        self.m._refresh_entry = lambda prov, i: (None, False)  # network hiccup: never removed
+        self.assertEqual(self.m._account_state("openai-codex", e)["state"], "unknown")
+
+    def test_rotate_applies_plan_with_hermes_cli(self):
+        calls = []
+        self.m._pool_entries = lambda prov: self.entries("a", "b", "c")
+        states = {"a": "full", "b": "dead", "c": "ok"}
+        self.m._account_state = lambda prov, e: {"state": states[e.id]}
+        self.m._run_hermes = lambda args: calls.append(args) or 0
+        r = self.m.rotate_accounts("openai-codex")
+        self.assertEqual(calls, [["auth", "remove", "openai-codex", "b"], ["auth", "priority", "openai-codex", "c", "0"]])
+        self.assertEqual((r["switched_to"], r["removed"], r["accounts"]), ("c", ["b"], 2))
+        self.assertTrue((self.m._hub_dir("") / "account-rotation.jsonl").exists())

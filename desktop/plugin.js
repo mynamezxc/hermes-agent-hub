@@ -27,7 +27,7 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.17'
+const PLUGIN_VERSION = '1.6.18'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
@@ -7200,6 +7200,15 @@ function UsagePop({ p, now }) {
     line('Token auto-refresh', st.has_refresh_token ? 'Yes' : st.source && /pool|chatgpt|codex/.test(String(st.source)) ? 'Managed by Hermes' : 'No'),
     st.last_refresh_s ? line('Last refreshed', relTime(st.last_refresh_s, now)) : null,
     line('Usage updated', p.updated_at ? relTime(p.updated_at, now) : '—'),
+    p.rotation && p.rotation.accounts > 1
+      ? h(
+          'small',
+          { className: cx('ah-usage-sub', p.rotation.all_used_up && 'ah-usage-err') },
+          p.rotation.all_used_up
+            ? `All ${p.rotation.accounts} accounts are out of their 5h/weekly limit: staying on this one until a limit resets.`
+            : `Auto-switch: ${p.rotation.accounts} accounts, moves to the next one when the 5h or weekly limit runs out${p.rotation.switched_to ? ' (just switched)' : ''}${p.rotation.removed ? `, removed ${p.rotation.removed} expired login` : ''}. Checked ${relTime(p.rotation.checked_at, now)}.`
+        )
+      : null,
     p.error ? h('small', { className: 'ah-usage-err' }, p.error) : null
   )
 }
