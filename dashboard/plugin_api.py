@@ -2881,6 +2881,39 @@ def _gc_logins() -> None:
         _logins.pop(sid, None)
 
 
+def _pool_ids(provider: str) -> list[str]:
+    """Ids of the pooled credentials for ``provider`` (ids only, never a secret). Profiles share the root pool."""
+    try:
+        data = json.loads((root_home() / "auth.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    pool = (data.get("credential_pool") or {}).get(provider) or []
+    return [str(e.get("id")) for e in pool if isinstance(e, dict) and e.get("id")]
+
+
+def _run_hermes(args: list[str]) -> int:
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        return subprocess.run(_hermes_argv() + args, capture_output=True, timeout=60, creationflags=flags).returncode
+    except (OSError, subprocess.SubprocessError):
+        return -1
+
+
+def _use_new_login(sess: dict[str, Any]) -> None:
+    """Make the account the owner just signed in with the one Hermes uses. ``hermes auth add`` and the
+    device flow append a new account at the LOWEST priority, so an exhausted older account kept being picked
+    and switching accounts in the Hub changed nothing. Runs once per approved login."""
+    if sess.get("promoted") is not None:
+        return
+    before = set(sess.get("pool_before") or [])
+    new = [i for i in _pool_ids(sess["provider"]) if i not in before]
+    sess["promoted"] = False
+    if new:
+        sess["promoted"] = _run_hermes(["auth", "priority", sess["provider"], new[-1], "0"]) == 0
+        sess["active_id"] = new[-1]
+    _usage_forget(sess["provider"])
+
+
 def _start_cli_login(agent: str, provider: str) -> dict[str, Any]:
     import threading
     argv = _hermes_argv() + ([] if agent == "default" else ["-p", agent]) + ["auth", "add", provider]
@@ -2890,7 +2923,8 @@ def _start_cli_login(agent: str, provider: str) -> dict[str, Any]:
                             env=env, creationflags=flags, text=True, encoding="utf-8", errors="replace", bufsize=1)
     sid = secrets.token_urlsafe(12)
     sess = {"id": sid, "agent": agent, "provider": provider, "kind": "cli", "proc": proc, "started": time.time(),
-            "lines": [], "url": None, "status": "pending", "needs_code": provider == "anthropic"}
+            "lines": [], "url": None, "status": "pending", "needs_code": provider == "anthropic",
+            "pool_before": _pool_ids(provider)}
 
     def pump():
         for line in proc.stdout:
@@ -2906,7 +2940,7 @@ def _start_cli_login(agent: str, provider: str) -> dict[str, Any]:
         sess["status"] = "approved" if code == 0 else "error"
         sess["exit_code"] = code
         if code == 0:
-            _usage_forget(provider)
+            _use_new_login(sess)
 
     threading.Thread(target=pump, daemon=True).start()
     _logins[sid] = sess
@@ -2915,7 +2949,7 @@ def _start_cli_login(agent: str, provider: str) -> dict[str, Any]:
 
 def _login_public(sess: dict[str, Any]) -> dict[str, Any]:
     keep = ("id", "agent", "provider", "kind", "status", "url", "user_code", "verification_url", "needs_code",
-            "exit_code", "error", "expires_in")
+            "exit_code", "error", "expires_in", "promoted")
     out = {k: sess.get(k) for k in keep if sess.get(k) is not None}
     out["log"] = sess.get("lines", [])[-12:]
     return out
@@ -2934,6 +2968,7 @@ async def provider_login(provider: str, request: Request, agent: str = Query("de
                 break
             await asyncio.sleep(0.25)
         return _login_public(sess)
+    before = _pool_ids(provider)
     try:
         body = await _oauth_routes().start_oauth_login(provider, request, profile=_profile_arg(agent))
     except HTTPException:
@@ -2942,6 +2977,7 @@ async def provider_login(provider: str, request: Request, agent: str = Query("de
         raise HTTPException(502, f"could not start the login: {redact(str(e))}")
     sid = str(body.get("session_id") or "")
     sess = {"id": sid, "agent": agent, "provider": provider, "kind": "device", "started": time.time(),
+            "pool_before": before,
             "status": "pending", "user_code": body.get("user_code"),
             "verification_url": body.get("verification_url") or body.get("verification_uri"),
             "expires_in": body.get("expires_in")}
@@ -2964,7 +3000,7 @@ async def provider_login_poll(sid: str) -> dict[str, Any]:
         except HTTPException as e:
             sess["status"], sess["error"] = "error", str(e.detail)
     if sess["status"] == "approved":
-        _usage_forget(sess["provider"])
+        _use_new_login(sess)
     return _login_public(sess)
 
 

@@ -867,6 +867,27 @@ class TeamSetupUsageTest(unittest.TestCase):
         self.assertAlmostEqual(st["expires_at_s"], 1793269939.568, places=2)
         self.assertGreater(st["last_refresh_s"], 1.7e9)
 
+    def test_new_login_becomes_the_account_in_use(self):
+        """Switching accounts in the Hub: the new credential lands last in the pool, so it must be moved to
+        priority 0, otherwise Hermes keeps using the old (exhausted) account."""
+        pool = [{"id": "old1", "priority": 0}, {"id": "old2", "priority": 1}]
+        (self.home / "auth.json").write_text(json.dumps({"credential_pool": {"openai-codex": pool}}), encoding="utf-8")
+        calls = []
+        self.m._run_hermes = lambda args: calls.append(args) or 0
+        sess = {"provider": "openai-codex", "pool_before": self.m._pool_ids("openai-codex")}
+        self.assertEqual(sess["pool_before"], ["old1", "old2"])
+        pool.append({"id": "new9", "priority": 2})
+        (self.home / "auth.json").write_text(json.dumps({"credential_pool": {"openai-codex": pool}}), encoding="utf-8")
+        self.m._use_new_login(sess)
+        self.assertEqual(calls, [["auth", "priority", "openai-codex", "new9", "0"]])
+        self.assertTrue(sess["promoted"])
+        self.m._use_new_login(sess)  # polled again: no second reorder
+        self.assertEqual(len(calls), 1)
+        same = {"provider": "openai-codex", "pool_before": ["old1", "old2", "new9"]}  # re-login, no new entry
+        self.m._use_new_login(same)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(same["promoted"])
+
     def test_login_code_guard(self):
         from fastapi import HTTPException
         with self.assertRaises(HTTPException):
