@@ -957,17 +957,20 @@ def _beat_note(ev: Optional[dict[str, Any]]) -> str:
     return redact(_clip(" ".join(str(note or "").split()), 200))
 
 
-def _block_info(task: dict[str, Any], ev: Optional[dict[str, Any]]) -> dict[str, Any]:
+def _block_info(task: dict[str, Any], ev: Optional[dict[str, Any]], superior: Optional[str] = None) -> dict[str, Any]:
     """Why a card is blocked and who has to act: ``needs_input`` waits on the card's creator (the agent who
-    can answer it, else the owner); ``capability`` on the owner; ``dependency`` on its parents."""
+    can answer it, else the owner); ``capability`` on the owner; ``dependency`` on its parents. ``superior``
+    replaces a non-agent creator (auto-decomposer) with the agent the card really reports to."""
     try:
         reason = (json.loads(ev.get("payload") or "{}") or {}).get("reason") if ev else None
     except (ValueError, AttributeError):
         reason = None
     kind = task.get("block_kind") or ""
-    creator = task.get("created_by") or ""
+    creator = superior or task.get("created_by") or ""
     if kind == "dependency":
         waiting = "parents"
+    elif re.search(r"\bSếp\b|\bowner\b|chủ sở hữu", str(reason or ""), re.I) and kind != "transient":
+        waiting = "owner"  # the agent says only the owner can answer (freeze, money, access…)
     elif kind == "needs_input" and creator and creator != task.get("assignee") and creator in set(list_agents()):
         waiting = creator
     elif kind == "transient":
@@ -976,6 +979,358 @@ def _block_info(task: dict[str, Any], ev: Optional[dict[str, Any]]) -> dict[str,
         waiting = "owner"
     return {"block_kind": kind or None, "block_reason": redact(_clip(" ".join(str(reason or "").split()), 400)) or None,
             "blocked_at": _num(ev.get("t")) if ev else None, "waiting_on": waiting}
+
+
+# ─────────────────────── workflow: who does what, who waits on whom, flows of cards ───────────────────────
+# Read straight from kanban.db: no model is called. A "flow" is a set of cards joined by dependencies; its
+# final card (no children) names it. Card A's parents must be done before A starts, so A's assignee waits on
+# the parents' assignees, and whoever delegated a card waits for its report.
+WORKFLOW_DAYS = 7
+STALE_RUN_S = 20 * 60          # running card without a heartbeat this long = stalled worker
+NON_AGENT_CREATORS = {"auto-decomposer", "agents-hub", "user", "specifier", "", None}
+OPEN = {"todo", "ready", "running", "blocked", "triage", "review", "scheduled"}
+
+
+def _workflow_rows(now: float) -> dict[str, Any]:
+    db = _kanban_db()
+    rows = query(db, "SELECT id, title, status, assignee, created_by, created_at, started_at, completed_at, "
+                     "last_heartbeat_at, worker_pid, block_kind, priority FROM tasks WHERE status != 'archived' "
+                     "AND (status != 'done' OR completed_at > ?)", (now - WORKFLOW_DAYS * 86400,))
+    tasks = {r["id"]: r for r in rows}
+    status_all = {r["id"]: r["status"] for r in query(db, "SELECT id, status FROM tasks")}
+    parents: dict[str, list[str]] = {}
+    children: dict[str, list[str]] = {}
+    for link in query(db, "SELECT parent_id, child_id FROM task_links"):
+        p, c = link["parent_id"], link["child_id"]
+        if p in tasks or c in tasks:
+            parents.setdefault(c, []).append(p)
+            children.setdefault(p, []).append(c)
+    beats = {r["task_id"]: r for r in query(
+        db, "SELECT task_id, payload, MAX(created_at) AS t FROM task_events WHERE kind = 'heartbeat' "
+            "AND payload IS NOT NULL AND payload != 'null' GROUP BY task_id")}
+    blocks = {r["task_id"]: r for r in query(
+        db, "SELECT task_id, payload, MAX(created_at) AS t FROM task_events WHERE kind = 'blocked' GROUP BY task_id")}
+    last_cm = {r["task_id"]: r for r in query(
+        db, "SELECT task_id, author, body, MAX(created_at) AS t FROM task_comments GROUP BY task_id")}
+    return {"tasks": tasks, "status": status_all, "parents": parents, "children": children, "beats": beats,
+            "blocks": blocks, "last_cm": last_cm}
+
+
+def _superior(tid: str, w: dict[str, Any], agents: set[str], seen: Optional[set[str]] = None) -> Optional[str]:
+    """The agent a card reports to: its creator, or for a card the decomposer split off, the superior of the
+    card that waits on it."""
+    t = w["tasks"].get(tid) or {}
+    cb = t.get("created_by")
+    if cb in agents:
+        return cb
+    seen = seen or set()
+    seen.add(tid)
+    for c in w["children"].get(tid, []):
+        if c not in seen:
+            s = _superior(c, w, agents, seen)
+            if s:
+                return s
+    return None
+
+
+def _root_blockers(tid: str, w: dict[str, Any], seen: Optional[set[str]] = None) -> list[str]:
+    """Open ancestors that are stuck (blocked/triage): why a todo card cannot start."""
+    seen = seen if seen is not None else set()
+    out: list[str] = []
+    for p in w["parents"].get(tid, []):
+        if p in seen:
+            continue
+        seen.add(p)
+        st = w["status"].get(p)
+        if st in ("blocked", "triage"):
+            out.append(p)
+        elif st != "done":
+            out += _root_blockers(p, w, seen)
+    return out
+
+
+def _task_view(tid: str, w: dict[str, Any], agents: set[str], now: float) -> dict[str, Any]:
+    t = w["tasks"][tid]
+    sup = _superior(tid, w, agents)
+    hb = _num(t.get("last_heartbeat_at"))
+    item = {"id": tid, "title": _clip(t.get("title"), 160), "status": t.get("status"), "assignee": t.get("assignee"),
+            "created_by": t.get("created_by"), "superior": sup, "created_at": _num(t.get("created_at")),
+            "started_at": _num(t.get("started_at")), "completed_at": _num(t.get("completed_at")), "heartbeat_at": hb,
+            "parents": w["parents"].get(tid, []), "children": w["children"].get(tid, []),
+            "open_parents": [p for p in w["parents"].get(tid, []) if w["status"].get(p) != "done"]}
+    note = _beat_note(w["beats"].get(tid))
+    if note:
+        item["progress"] = {"text": note, "at": _num(w["beats"][tid].get("t"))}
+    cm = w["last_cm"].get(tid)
+    if cm:
+        item["last_comment"] = {"author": cm.get("author"), "at": _num(cm.get("t")),
+                                "text": redact(_clip(" ".join(str(cm.get("body") or "").split()), 200))}
+    if t.get("status") == "blocked":
+        item.update(_block_info(t, w["blocks"].get(tid), sup))
+    if t.get("status") in ("todo", "triage"):
+        item["stuck_on"] = _root_blockers(tid, w)
+    if t.get("status") == "running" and hb and now - hb > STALE_RUN_S and not _pid_alive(t.get("worker_pid")):
+        item["stalled"] = True
+    return item
+
+
+def _flows(items: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Connected groups of cards; named after the final card(s) (no children)."""
+    seen: set[str] = set()
+    flows = []
+    for start in items:
+        if start in seen:
+            continue
+        comp, stack = [], [start]
+        while stack:
+            x = stack.pop()
+            if x in seen or x not in items:
+                continue
+            seen.add(x)
+            comp.append(x)
+            stack += items[x]["parents"] + items[x]["children"]
+        sinks = [x for x in comp if not [c for c in items[x]["children"] if c in items]] or comp
+        final = max(sinks, key=lambda x: items[x]["created_at"] or 0)
+        counts: dict[str, int] = {}
+        for x in comp:
+            counts[items[x]["status"]] = counts.get(items[x]["status"], 0) + 1
+        open_n = sum(n for s, n in counts.items() if s in OPEN)
+        last = max((items[x].get("completed_at") or items[x].get("heartbeat_at") or items[x]["created_at"] or 0) for x in comp)
+        flows.append({"id": final, "title": items[final]["title"], "final": final, "tasks": sorted(
+            comp, key=lambda x: items[x]["created_at"] or 0), "counts": counts, "total": len(comp),
+            "done": counts.get("done", 0), "open": open_n, "updated_at": last,
+            "blocked": [x for x in comp if items[x]["status"] in ("blocked", "triage")],
+            "running": [x for x in comp if items[x]["status"] == "running"]})
+    flows.sort(key=lambda f: (f["open"] == 0, -(f["updated_at"] or 0)))
+    return flows
+
+
+def _agent_lanes(items: dict[str, dict[str, Any]], agents: list[str]) -> list[dict[str, Any]]:
+    team = load_team()
+    lanes = []
+    for a in agents:
+        mine = [t for t in items.values() if t["assignee"] == a and t["status"] in OPEN]
+        running = [t["id"] for t in mine if t["status"] == "running"]
+        blocked = [t["id"] for t in mine if t["status"] == "blocked"]
+        queued = [t["id"] for t in mine if t["status"] in ("todo", "ready", "triage", "scheduled")]
+        review = [t["id"] for t in mine if t["status"] == "review"]
+        waits: dict[str, list[str]] = {}
+        for t in mine:  # my queued cards wait on their open parents' assignees
+            for p in t["open_parents"]:
+                who = (items.get(p) or {}).get("assignee")
+                if who and who != a:
+                    waits.setdefault(who, []).append(p)
+        for t in items.values():  # cards I delegated and that are still open: I wait for their report
+            if t["superior"] == a and t["assignee"] != a and t["status"] in OPEN:
+                waits.setdefault(t["assignee"], []).append(t["id"])
+        if any(items[b].get("waiting_on") == "owner" for b in blocked):
+            waits.setdefault("owner", []).extend(b for b in blocked if items[b].get("waiting_on") == "owner")
+        state = "working" if running else "blocked" if blocked else "review" if review else "queued" if queued else "idle"
+        info = team.get(a, {})
+        lanes.append({"agent": a, "name": info.get("name") or a, "role": info.get("role"),
+                      "reports_to": info.get("reports_to"), "state": state, "running": running, "blocked": blocked,
+                      "queued": queued, "review": review,
+                      "waiting_for": [{"who": k, "tasks": sorted(set(v))} for k, v in waits.items()]})
+    return lanes
+
+
+def workflow_snapshot(now: Optional[float] = None) -> dict[str, Any]:
+    now = now or time.time()
+    w = _workflow_rows(now)
+    agent_ids = list_agents()
+    agents = set(agent_ids)
+    items = {tid: _task_view(tid, w, agents, now) for tid in w["tasks"]}
+    lanes = _agent_lanes(items, agent_ids)
+    for lane in lanes:  # who waits on me
+        lane["waited_by"] = sorted({o["agent"] for o in lanes for wf in o["waiting_for"] if wf["who"] == lane["agent"]})
+    owner = [t for t in items.values() if t["status"] == "blocked" and t.get("waiting_on") == "owner"]
+    return {"at": now, "tasks": items, "flows": _flows(items), "agents": lanes,
+            "owner_actions": sorted(owner, key=lambda t: t.get("blocked_at") or 0),
+            "heartbeat": _hb_public()}
+
+
+@router.get("/workflow")
+def workflow() -> dict[str, Any]:
+    _ensure_hb_thread()
+    return workflow_snapshot()
+
+
+# ─────────────── task heartbeat: token-free watchdog that keeps cards moving and reports flowing up ───────────────
+# Every minute, with no model call: (1) a todo card whose parents are all done is promoted; (2) a card blocked
+# on a question for the agent that delegated it gets a short "answer this" card for that agent; (3) when a
+# delegated card is done and its superior has nothing planned on it, the superior gets ONE "review the report
+# and continue" card. Cards it creates are authored by `agents-hub`, so they never trigger further report-ups.
+HB_EVERY_S = 60
+HB_PROMOTE_AFTER_S = 120
+HB_ANSWER_AFTER_S = 5 * 60
+HB_LOG_MAX = 300
+_hb_thread: Optional[threading.Thread] = None
+_hb_last: dict[str, Any] = {}
+
+
+def _hb_settings() -> dict[str, bool]:
+    s = _read_json(_hub_dir("") / "settings.json", {})
+    return {k: s.get(k, True) is not False for k in ("task_heartbeat", "auto_promote", "auto_answer_cards",
+                                                     "auto_report_up")}
+
+
+def _hb_state() -> dict[str, Any]:
+    return _read_json(_hub_dir("") / "task-heartbeat.json", {})
+
+
+def _hb_log(entry: dict[str, Any]) -> None:
+    path = _hub_dir("") / "task-heartbeat.jsonl"
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": time.time(), **entry}, ensure_ascii=False) + "\n")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) > HB_LOG_MAX * 2:
+            path.write_text("\n".join(lines[-HB_LOG_MAX:]) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _kanban_cli(args: list[str]) -> int:
+    return _run_hermes(["kanban", *args])
+
+
+def _create_card(assignee: str, title: str, body: str, key: str, parents: Optional[list[str]] = None,
+                 priority: int = 5) -> bool:
+    args = ["create", title, "--assignee", assignee, "--body", body, "--created-by", "agents-hub",
+            "--idempotency-key", key, "--priority", str(priority)]
+    for p in parents or []:
+        args += ["--parent", p]
+    return _kanban_cli(args) == 0
+
+
+def plan_heartbeat(snap: dict[str, Any], state: dict[str, Any], now: float, settings: dict[str, bool]) -> list[dict[str, Any]]:
+    """Pure decision over a workflow snapshot. Returns actions; never touches the board itself."""
+    items = snap["tasks"]
+    agents = {lane["agent"] for lane in snap["agents"]}
+    actions: list[dict[str, Any]] = []
+    if settings["auto_promote"]:
+        for t in items.values():
+            if t["status"] == "todo" and t["parents"] and not t["open_parents"]:
+                done_at = max((items.get(p, {}).get("completed_at") or 0) for p in t["parents"])
+                if now - done_at >= HB_PROMOTE_AFTER_S:
+                    actions.append({"do": "promote", "task": t["id"]})
+    if settings["auto_answer_cards"]:
+        for t in items.values():
+            who = t.get("waiting_on")
+            if t["status"] != "blocked" or who not in agents or who == t["assignee"]:
+                continue
+            since = t.get("blocked_at") or 0
+            replied = (t.get("last_comment") or {}).get("author") == who and (t["last_comment"].get("at") or 0) > since
+            fresh = since > (state.get("report_since") or now)  # only blocks raised since the heartbeat started
+            if fresh and now - since >= HB_ANSWER_AFTER_S and not replied:
+                actions.append({"do": "answer", "task": t["id"], "agent": who, "key": f"hub-answer-{t['id']}-{int(since)}"})
+    if settings["auto_report_up"]:
+        since = state.get("report_since") or now
+        per: dict[str, list[str]] = {}
+        for t in items.values():
+            sup = t["superior"]
+            if (t["status"] != "done" or not sup or sup == t["assignee"] or sup not in agents
+                    or (t.get("completed_at") or 0) <= since or t["created_by"] == "agents-hub"):
+                continue
+            planned = [c for c in t["children"] if (items.get(c) or {}).get("assignee") == sup]
+            if not planned:  # the superior has no follow-up card waiting on this one
+                per.setdefault(sup, []).append(t["id"])
+        for sup, ids in per.items():
+            ids.sort()
+            actions.append({"do": "report_up", "agent": sup, "tasks": ids,
+                            "key": "hub-report-" + hashlib.sha1((sup + ",".join(ids)).encode()).hexdigest()[:12]})
+    return actions
+
+
+def _answer_body(t: dict[str, Any]) -> str:
+    return (f"@{t['assignee']} đang bị chặn trên thẻ {t['id']} ({t['title']}) và chờ BẠN, người giao việc, quyết định.\n\n"
+            f"Lý do chặn: {t.get('block_reason') or '(xem thẻ)'}\n\n"
+            f"Việc cần làm:\n"
+            f"1. `kanban_show {t['id']}`: đọc comment cuối.\n"
+            f"2. Trả lời hoặc quyết định bằng `kanban_comment {t['id']}`. Trong phạm vi quyền của bạn thì quyết luôn. "
+            f"Việc cần Sếp (chi tiền, xuất bản, bí mật, quyền mới) thì ghi rõ trong comment và để thẻ chờ.\n"
+            f"3. Nếu đã gỡ được thì `kanban_unblock {t['id']}`.\n"
+            f"4. Complete thẻ này với 1 câu tóm tắt quyết định.")
+
+
+def _report_body(items: dict[str, dict[str, Any]], ids: list[str]) -> str:
+    lines = ["Cấp dưới đã làm xong các thẻ bạn giao. Hãy nghiệm thu và quyết định bước tiếp:\n"]
+    for i in ids:
+        t = items.get(i) or {}
+        lines.append(f"- {i} @{t.get('assignee')}: {t.get('title')}")
+    lines += ["",
+              "Việc cần làm:",
+              "1. `kanban_show <id>` từng thẻ: đọc summary và artifacts, rồi KIỂM đầu ra thật (file, số liệu). Không tin "
+              "mỗi lời tự báo cáo.",
+              "2. Đạt thì comment \"nghiệm thu\" lên thẻ. Chưa đạt thì tạo thẻ sửa cụ thể giao lại cho người đó.",
+              "3. Bước tiếp theo: tạo thẻ mới. Việc phải chờ nhiều thẻ xong thì tạo thẻ có `parents` = các thẻ đó, "
+              "thẻ sẽ tự chạy khi chúng xong.",
+              "4. Cập nhật goal của bạn. Nếu đã đến lúc báo cấp trên thì ghi báo cáo vào summary khi complete thẻ này."]
+    return "\n".join(lines)
+
+
+def run_heartbeat() -> dict[str, Any]:
+    settings = _hb_settings()
+    now = time.time()
+    state = _hb_state()
+    if "report_since" not in state:  # first run: only cards finished from now on are reported up (no backlog flood)
+        state["report_since"] = now
+        _write_json(_hub_dir("") / "task-heartbeat.json", state)
+    if not settings["task_heartbeat"]:
+        return {"enabled": False}
+    snap = workflow_snapshot(now)
+    actions = plan_heartbeat(snap, state, now, settings)
+    done_keys = set(state.get("done_keys") or [])
+    applied = []
+    for a in actions:
+        key = a.get("key") or f"promote-{a.get('task')}"
+        if key in done_keys:
+            continue
+        ok = False
+        if a["do"] == "promote":
+            ok = _kanban_cli(["promote", a["task"], "agents-hub heartbeat: all parents are done"]) == 0
+        elif a["do"] == "answer":
+            t = snap["tasks"][a["task"]]
+            ok = _create_card(a["agent"], _clip(f"Trả lời @{t['assignee']}: {t['title']}", 150), _answer_body(t), a["key"], priority=6)
+        elif a["do"] == "report_up":
+            ok = _create_card(a["agent"], f"Nghiệm thu {len(a['tasks'])} thẻ cấp dưới đã xong và giao bước tiếp",
+                              _report_body(snap["tasks"], a["tasks"]), a["key"], priority=5)
+        if ok:
+            done_keys.add(key)
+            applied.append(a)
+            _hb_log(a)
+    state["done_keys"] = sorted(done_keys)[-2000:]
+    state["last_run"] = now
+    _write_json(_hub_dir("") / "task-heartbeat.json", state)
+    _hb_last.update({"at": now, "applied": applied, "planned": len(actions)})
+    return {"enabled": True, "applied": applied}
+
+
+def _hb_public() -> dict[str, Any]:
+    log = []
+    try:
+        for line in (_hub_dir("") / "task-heartbeat.jsonl").read_text(encoding="utf-8").splitlines()[-15:]:
+            log.append(json.loads(line))
+    except (OSError, ValueError):
+        pass
+    return {"enabled": _hb_settings()["task_heartbeat"], "every_s": HB_EVERY_S, "last_run": _hb_last.get("at"),
+            "log": list(reversed(log))}
+
+
+def _hb_loop() -> None:
+    while True:
+        try:
+            run_heartbeat()
+        except Exception as e:  # never let the loop die
+            _hb_last.update({"at": time.time(), "error": redact(str(e))[:200]})
+        time.sleep(HB_EVERY_S)
+
+
+def _ensure_hb_thread() -> None:
+    global _hb_thread
+    if _hb_thread is None or not _hb_thread.is_alive():
+        _hb_thread = threading.Thread(target=_hb_loop, name="agents-hub-task-heartbeat", daemon=True)
+        _hb_thread.start()
 
 
 # ───────────────────────────────── changes ───────────────────────────────────
@@ -3325,6 +3680,7 @@ def usage(agent: str = Query("default"), wait: float = Query(0.0, ge=0, le=20)) 
     refreshed in the background (single flight per agent/provider), so the UI never blocks."""
     _check_agent(agent)
     _ensure_rotation_thread()
+    _ensure_hb_thread()
     now = time.time()
     threads = []
     for provider in HUB_PROVIDERS:

@@ -27,7 +27,7 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.18'
+const PLUGIN_VERSION = '1.6.19'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
@@ -76,7 +76,7 @@ function Icon({ name, size, spinning, className }) {
 const TABS = [
   { id: 'chat', label: 'Chat', icon: 'comment' },
   { id: 'overview', label: 'Overview', icon: 'dashboard' },
-  { id: 'conversations', label: 'Conversations', icon: 'comment-discussion' },
+  { id: 'workflow', label: 'Workflow', icon: 'type-hierarchy-sub' },
   { id: 'works', label: 'Scheduled', icon: 'history' },
   { id: 'tasks', label: 'Tasks', icon: 'checklist' },
   { id: 'changes', label: 'Changes', icon: 'git-compare' },
@@ -88,6 +88,10 @@ const tabsFor = agent => TABS.filter(t => (agent ? t.id !== 'overview' : t.id !=
 
 function effectiveTab(ui) {
   const tabs = tabsFor(ui.agent)
+
+  if (ui.tab === 'conversations' && !ui.agent) {
+    return 'conversations' // reached from Workflow ("Conversations" switch); not a tab of its own any more
+  }
 
   return tabs.some(t => t.id === ui.tab) ? ui.tab : tabs[0].id
 }
@@ -140,6 +144,10 @@ const STATUS_LABEL = {
   error: 'Error',
   blocked: 'Blocked',
   queued: 'Queued',
+  todo: 'Waiting',
+  ready: 'Ready',
+  triage: 'Triage',
+  working: 'Working',
   review: 'In review',
   stopped: 'Stopped'
 }
@@ -157,6 +165,10 @@ const STATUS_TONE = {
   scheduled: 'neutral',
   pending: 'neutral',
   queued: 'neutral',
+  todo: 'neutral',
+  ready: 'info',
+  triage: 'warn',
+  working: 'info',
   review: 'info',
   idle: 'neutral',
   stopped: 'neutral'
@@ -306,6 +318,7 @@ function initialState(saved) {
     tasks: res(),
     changes: res(),
     shared: res(),
+    workflow: res(),
     detail: {},
     diff: {},
     timeline: {},
@@ -417,7 +430,8 @@ const ENDPOINTS = {
   works: '/works',
   tasks: '/tasks',
   changes: '/changes',
-  shared: '/shared'
+  shared: '/shared',
+  workflow: '/workflow'
 }
 
 const REST_TIMEOUT_MS = 20000
@@ -3320,6 +3334,232 @@ function Overview({ s, v }) {
 }
 
 /* ───────────────────────── conversations ───────────────────────── */
+
+/* ───────────────────────── workflow: who does what, who waits on whom ───────────────────────── */
+
+const LANE_TONE = { working: 'running', blocked: 'blocked', review: 'review', queued: 'queued', idle: 'idle' }
+const TASK_ICON = { done: 'pass-filled', running: 'loading', blocked: 'warning', triage: 'warning', review: 'eye', todo: 'clock', ready: 'debug-start', scheduled: 'calendar' }
+
+function wfData(s) {
+  return s.workflow && s.workflow.data
+}
+
+function whoName(s, who) {
+  return who === 'owner' ? 'you (owner)' : agentName(s, who)
+}
+
+// One line that says where a card is: running note, why blocked and on whom, what it waits for.
+function taskLine(s, wf, t) {
+  const title = id => ((wf.tasks[id] || {}).title || id).slice(0, 60)
+
+  if (t.status === 'running') {
+    return t.stalled ? 'Worker stopped answering: the dispatcher will retry it' : t.progress ? t.progress.text : `Working · started ${relTime(t.started_at, s.now)}`
+  }
+
+  if (t.status === 'blocked' || t.status === 'triage') {
+    return `Waiting on ${whoName(s, t.waiting_on || 'owner')}${t.block_reason ? `: ${t.block_reason}` : ''}`
+  }
+
+  if (t.status === 'todo' && t.open_parents && t.open_parents.length) {
+    const stuck = (t.stuck_on || []).map(id => `${title(id)} (${agentName(s, (wf.tasks[id] || {}).assignee)})`)
+
+    return stuck.length ? `Cannot start: ${stuck.join(', ')} is blocked` : `Starts when ${t.open_parents.length} earlier task${t.open_parents.length > 1 ? 's' : ''} finish: ${t.open_parents.map(title).join(', ')}`
+  }
+
+  if (t.status === 'ready') {
+    return 'Ready: the dispatcher starts it within a minute'
+  }
+
+  if (t.status === 'done') {
+    return `Done ${relTime(t.completed_at, s.now)}${t.superior && t.superior !== t.assignee ? ` · reported to ${agentName(s, t.superior)}` : ''}`
+  }
+
+  return t.last_comment ? `${agentName(s, t.last_comment.author)}: ${t.last_comment.text}` : ''
+}
+
+function TaskRow({ s, wf, t, depth = 0 }) {
+  return h(
+    'li',
+    { className: cx('ah-wf-task', `is-${t.status}`), style: { '--ah-depth': depth } },
+    h(Icon, { name: TASK_ICON[t.status] || 'circle-outline', size: 14, spinning: t.status === 'running' && !t.stalled, className: 'ah-wf-ticon' }),
+    h(
+      'span',
+      { className: 'ah-wf-tbody' },
+      h('span', { className: 'ah-wf-ttitle', title: `${t.id} · ${t.title}` }, t.title),
+      h('span', { className: 'ah-wf-tline', title: taskLine(s, wf, t) }, taskLine(s, wf, t))
+    ),
+    t.assignee ? h('span', { className: 'ah-inline-agent', title: agentName(s, t.assignee) }, h(Avatar, { id: t.assignee, name: agentName(s, t.assignee), size: 20 }), h('span', null, agentName(s, t.assignee))) : null,
+    h(StatusChip, { status: t.stalled ? 'stopped' : t.status })
+  )
+}
+
+// Cards of one flow in dependency order: a card is listed after the cards it waits for.
+function flowOrder(wf, flow) {
+  const set = new Set(flow.tasks)
+  const depth = {}
+  const visit = (id, seen = new Set()) => {
+    if (depth[id] !== undefined) return depth[id]
+    if (seen.has(id)) return 0
+    seen.add(id)
+    const ps = ((wf.tasks[id] || {}).parents || []).filter(p => set.has(p))
+    depth[id] = ps.length ? 1 + Math.max(...ps.map(p => visit(p, seen))) : 0
+    return depth[id]
+  }
+
+  flow.tasks.forEach(id => visit(id))
+
+  return [...flow.tasks].sort((a, b) => depth[a] - depth[b] || ((wf.tasks[a] || {}).created_at || 0) - ((wf.tasks[b] || {}).created_at || 0)).map(id => ({ id, depth: depth[id] }))
+}
+
+function FlowCard({ s, wf, flow, open }) {
+  const [expanded, setExpanded] = useState(open)
+  const pct = flow.total ? Math.round((flow.done / flow.total) * 100) : 0
+  const tone = flow.blocked.length ? 'warn' : flow.running.length ? 'info' : flow.open ? 'neutral' : 'ok'
+
+  return h(
+    'section',
+    { className: cx('ah-wf-flow', `is-${tone}`) },
+    h(
+      'button',
+      { type: 'button', className: 'ah-wf-flow-head ah-state', 'aria-expanded': expanded, onClick: () => setExpanded(!expanded) },
+      h(Icon, { name: expanded ? 'chevron-down' : 'chevron-right', size: 14 }),
+      h('span', { className: 'ah-wf-flow-title' }, flow.title),
+      h('span', { className: 'ah-wf-bar', 'aria-label': `${pct}% done` }, h('span', { style: { width: `${Math.max(2, pct)}%` } })),
+      h('span', { className: 'ah-row-sub' }, `${flow.done}/${flow.total} done`),
+      flow.running.length ? h(Chip, { tone: 'info' }, `${flow.running.length} working`) : null,
+      flow.blocked.length ? h(Chip, { tone: 'warn' }, `${flow.blocked.length} blocked`) : null
+    ),
+    expanded ? h('ul', { className: 'ah-wf-tasks' }, flowOrder(wf, flow).map(({ id, depth }) => (wf.tasks[id] ? h(TaskRow, { key: id, s, wf, t: wf.tasks[id], depth: Math.min(depth, 6) }) : null))) : null
+  )
+}
+
+function LaneRow({ s, wf, lane, depth }) {
+  const first = id => wf.tasks[id]
+  const run = lane.running.map(first).filter(Boolean)
+  const blk = lane.blocked.map(first).filter(Boolean)
+  const doing = run.length
+    ? run.map(t => `${t.title}${t.progress ? ` · ${t.progress.text}` : ''}`).join(' | ')
+    : blk.length
+      ? `Blocked: ${blk[0].title}`
+      : lane.queued.length
+        ? `${lane.queued.length} task${lane.queued.length > 1 ? 's' : ''} queued`
+        : 'Idle'
+
+  return h(
+    'li',
+    { className: cx('ah-wf-lane', `is-${lane.state}`), style: { '--ah-depth': depth } },
+    h(
+      'button',
+      { type: 'button', className: 'ah-wf-lane-main ah-state', onClick: () => setUi({ agent: lane.agent, tab: 'chat', handoff: null, sideFile: null }), title: `Open ${lane.name}` },
+      h('span', { className: cx('ah-live-av', lane.state === 'working' && 'is-on') }, h(Avatar, { id: lane.agent, name: lane.name, size: 30, mood: lane.state === 'working' ? 'working' : lane.state === 'blocked' ? 'waiting' : 'happy' })),
+      h(
+        'span',
+        { className: 'ah-row-body' },
+        h('span', { className: 'ah-row-title' }, lane.name, lane.role ? h('span', { className: 'ah-row-sub' }, ` · ${lane.role}`) : null),
+        h('span', { className: 'ah-row-sub ah-wf-doing', title: doing }, doing),
+        lane.waiting_for.length
+          ? h('span', { className: 'ah-wf-waits' }, 'Waiting for ', lane.waiting_for.map((w, i) => h('b', { key: w.who, className: w.who === 'owner' ? 'is-owner' : '' }, `${i ? ', ' : ''}${whoName(s, w.who)} (${w.tasks.length})`)))
+          : null
+      ),
+      h(StatusChip, { status: LANE_TONE[lane.state] || lane.state })
+    )
+  )
+}
+
+// The team as an org chart (reports_to), each member with what it does and whom it waits for.
+function TeamTree({ s, wf }) {
+  const lanes = wf.agents
+  const ids = new Set(lanes.map(l => l.agent))
+  const kids = {}
+
+  lanes.forEach(l => {
+    const up = ids.has(l.reports_to) ? l.reports_to : ''
+    ;(kids[up] = kids[up] || []).push(l)
+  })
+  const rows = []
+  const walk = (up, depth) => (kids[up] || []).forEach(l => {
+    rows.push(h(LaneRow, { key: l.agent, s, wf, lane: l, depth }))
+    walk(l.agent, depth + 1)
+  })
+
+  walk('', 0)
+
+  return h('ul', { className: 'ah-wf-lanes' }, rows)
+}
+
+function HeartbeatLog({ s, wf }) {
+  const hb = wf.heartbeat || {}
+  const label = a => (a.do === 'promote' ? `Started ${a.task} (all earlier tasks done)` : a.do === 'answer' ? `Asked ${agentName(s, a.agent)} to answer ${a.task}` : a.do === 'report_up' ? `Asked ${agentName(s, a.agent)} to review ${a.tasks.length} finished task(s) and plan the next step` : a.do)
+
+  return h(
+    'div',
+    { className: 'ah-wf-hb' },
+    h('p', { className: 'ah-row-sub' }, hb.enabled === false ? 'Task heartbeat is off (settings.json: task_heartbeat).' : `Task heartbeat checks the board every ${hb.every_s || 60}s without calling any model${hb.last_run ? ` · last check ${relTime(hb.last_run, s.now)}` : ''}. It starts cards whose earlier tasks are done, asks the delegating agent to answer a blocked card, and asks a superior to review finished work and plan the next step.`),
+    (hb.log || []).length ? h('ul', { className: 'ah-wf-hblog' }, hb.log.map((a, i) => h('li', { key: i }, h('time', { className: 'ah-side-time' }, relTime(a.at, s.now)), ` ${label(a)}`))) : null
+  )
+}
+
+function Workflow({ s }) {
+  const wf = wfData(s)
+
+  if (!wf) {
+    return s.workflow && s.workflow.status === 'error' ? h(ErrorState, { message: 'Could not load the workflow', detail: s.workflow.error, onRetry: () => void load() }) : h(Skeleton, { rows: 8, className: 'ah-inset' })
+  }
+
+  const openFlows = wf.flows.filter(f => f.open)
+  const doneFlows = wf.flows.filter(f => !f.open)
+  const working = wf.agents.filter(l => l.state === 'working').length
+
+  return h(
+    'div',
+    { className: 'ah-pad ah-wf' },
+    h(
+      'div',
+      { className: 'ah-wf-top' },
+      h('span', { className: 'ah-row-sub' }, `${working} working · ${wf.agents.filter(l => l.state === 'blocked').length} blocked · ${openFlows.length} open flows · ${Object.values(wf.tasks).filter(t => t.status === 'todo').length} waiting tasks`),
+      h('span', { className: 'ah-spacer' }),
+      h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => setUi({ tab: 'conversations' }) }, h(Icon, { name: 'comment-discussion', size: 14 }), ' Conversations')
+    ),
+    wf.owner_actions.length
+      ? h(SectionCard, { title: `Waiting on you · ${wf.owner_actions.length}`, icon: 'bell' }, h('ul', { className: 'ah-wf-tasks' }, wf.owner_actions.map(t => h(TaskRow, { key: t.id, s, wf, t }))))
+      : null,
+    h(SectionCard, { title: 'Team: who does what, who waits for whom', icon: 'organization' }, h(TeamTree, { s, wf })),
+    h(
+      SectionCard,
+      { title: `Flows · ${openFlows.length} open`, icon: 'type-hierarchy-sub' },
+      openFlows.length ? openFlows.map((f, i) => h(FlowCard, { key: f.id, s, wf, flow: f, open: i < 4 })) : h('p', { className: 'ah-side-empty' }, 'No open flow.'),
+      doneFlows.length ? h('details', { className: 'ah-wf-done' }, h('summary', null, `${doneFlows.length} finished flows (last 7 days)`), doneFlows.map(f => h(FlowCard, { key: f.id, s, wf, flow: f, open: false }))) : null
+    ),
+    h(SectionCard, { title: 'Task heartbeat', icon: 'pulse' }, h(HeartbeatLog, { s, wf }))
+  )
+}
+
+// Chat side panel: the progress of everything this agent delegated or waits for, so a quiet chat is never opaque.
+function TeamProgressSection({ s, agent }) {
+  const wf = wfData(s)
+  const lane = wf && wf.agents.find(l => l.agent === agent)
+
+  if (!lane) {
+    return h('p', { className: 'ah-side-empty' }, wf ? 'No task for this agent.' : 'Loading…')
+  }
+
+  const delegated = Object.values(wf.tasks).filter(t => t.superior === agent && t.assignee !== agent && t.status !== 'done')
+  const recent = Object.values(wf.tasks)
+    .filter(t => t.superior === agent && t.assignee !== agent && t.status === 'done')
+    .sort((a, b) => (b.completed_at || 0) - (a.completed_at || 0))
+    .slice(0, 4)
+  const own = [...lane.running, ...lane.blocked, ...lane.queued].map(id => wf.tasks[id]).filter(Boolean)
+
+  return h(
+    'div',
+    { className: 'ah-wf-side' },
+    h('p', { className: 'ah-row-sub' }, h(StatusChip, { status: LANE_TONE[lane.state] }), ' ', lane.waiting_for.length ? ['Waiting for ', lane.waiting_for.map(w => `${whoName(s, w.who)} (${w.tasks.length})`).join(', ')] : 'Not waiting for anyone', lane.waited_by.length ? ` · ${lane.waited_by.map(a => agentName(s, a)).join(', ')} wait for this agent` : ''),
+    own.length ? [h('small', { key: 'o', className: 'ah-usage-sub' }, 'Its own tasks'), h('ul', { key: 'ol', className: 'ah-wf-tasks is-compact' }, own.map(t => h(TaskRow, { key: t.id, s, wf, t })))] : null,
+    delegated.length ? [h('small', { key: 'd', className: 'ah-usage-sub' }, `Delegated, in progress · ${delegated.length}`), h('ul', { key: 'dl', className: 'ah-wf-tasks is-compact' }, delegated.map(t => h(TaskRow, { key: t.id, s, wf, t })))] : null,
+    recent.length ? [h('small', { key: 'r', className: 'ah-usage-sub' }, 'Reported back recently'), h('ul', { key: 'rl', className: 'ah-wf-tasks is-compact' }, recent.map(t => h(TaskRow, { key: t.id, s, wf, t })))] : null,
+    h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => setUi({ agent: null, tab: 'workflow' }) }, h(Icon, { name: 'type-hierarchy-sub', size: 14 }), ' Whole team workflow')
+  )
+}
 
 function Conversations({ s, v }) {
   const items = v.conversations
@@ -6282,6 +6522,9 @@ function ChatSide({ s, agent }) {
   const cmdsSec = h(SideSection, { key: 'cmds', id: 'cmds', title: 'Running commands', icon: 'terminal', count: cmdCount(s, agent) }, h(CommandsSection, { s, agent }))
   const toolCount = ((s.tools[agent] && s.tools[agent].data && s.tools[agent].data.tools) || []).length
   const toolsSec = h(SideSection, { key: 'tools', id: 'tools', title: 'Saved tools', icon: 'tools', count: toolCount }, h(ToolsSection, { s, agent }))
+  const lane = wfData(s) && wfData(s).agents.find(l => l.agent === agent)
+  const teamCount = lane ? lane.running.length + lane.blocked.length + lane.queued.length + Object.values(wfData(s).tasks).filter(t => t.superior === agent && t.assignee !== agent && t.status !== 'done').length : 0
+  const teamSec = h(SideSection, { key: 'team', id: 'team', title: 'Team progress', icon: 'type-hierarchy-sub', count: teamCount }, h(TeamProgressSection, { s, agent }))
   let content
 
   if (!entry || (entry.status === 'loading' && !data)) {
@@ -6307,7 +6550,7 @@ function ChatSide({ s, agent }) {
       h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Reload', 'aria-label': 'Reload', onClick: () => { void fetchWorkspace(agent); void fetchTools(agent) } }, h(Icon, { name: 'sync', size: 14, spinning: !!(entry && entry.status === 'loading') })),
       h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Hide panel', 'aria-label': 'Hide panel', onClick: () => setUi({ side: false }) }, h(Icon, { name: 'close', size: 14 }))
     ),
-    h('div', { className: 'ah-side-body' }, goalsSec, cmdsSec, toolsSec, content)
+    h('div', { className: 'ah-side-body' }, teamSec, goalsSec, cmdsSec, toolsSec, content)
   )
 }
 
@@ -6900,6 +7143,8 @@ function HubPage() {
     body = h(ChatView, { key: s.ui.agent, s })
   } else if (tab === 'overview') {
     body = h(Overview, { s, v })
+  } else if (tab === 'workflow') {
+    body = h(Workflow, { s })
   } else if (tab === 'conversations') {
     body = h(Conversations, { s, v })
   } else if (tab === 'works') {
@@ -8244,6 +8489,36 @@ const CSS = `
 .ah-root .ah-task-block-why,.ah-root .ah-task-note{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .ah-root .ah-task-note{margin:4px 0;font-size:12px;opacity:.85}
 .ah-root .ah-shared-notes{margin:6px 0;padding-left:18px;font-size:12.5px}
+.ah-root .ah-wf{display:flex;flex-direction:column;gap:14px}
+.ah-root .ah-wf-top{display:flex;align-items:center;gap:8px}
+.ah-root .ah-wf-lanes,.ah-root .ah-wf-tasks,.ah-root .ah-wf-hblog{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.ah-root .ah-wf-lane{padding-left:calc(var(--ah-depth,0) * 22px);position:relative}
+.ah-root .ah-wf-lane::before{content:"";position:absolute;left:calc(var(--ah-depth,0) * 22px - 12px);top:0;bottom:50%;width:10px;border-left:1px solid var(--ah-line,rgba(127,127,127,.35));border-bottom:1px solid var(--ah-line,rgba(127,127,127,.35));display:var(--ah-tree,block)}
+.ah-root .ah-wf-lane[style*="--ah-depth: 0"]::before,.ah-root .ah-wf-lane[style*="--ah-depth:0"]::before{display:none}
+.ah-root .ah-wf-lane-main{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px;border-radius:var(--ah-r-sm,8px);text-align:left;background:none;border:0;color:inherit;cursor:pointer}
+.ah-root .ah-wf-lane.is-blocked .ah-wf-lane-main{background:color-mix(in srgb,var(--ah-warn,#c80) 9%,transparent)}
+.ah-root .ah-wf-lane.is-working .ah-wf-lane-main{background:color-mix(in srgb,var(--ah-info,#36c) 8%,transparent)}
+.ah-root .ah-wf-doing,.ah-root .ah-wf-tline{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.ah-root .ah-wf-waits{display:block;font-size:12px;opacity:.85}
+.ah-root .ah-wf-waits b{font-weight:600}
+.ah-root .ah-wf-waits b.is-owner{color:var(--ah-err,#c33)}
+.ah-root .ah-wf-flow{border:1px solid var(--ah-line,rgba(127,127,127,.25));border-radius:var(--ah-r-sm,8px);margin:6px 0;overflow:hidden}
+.ah-root .ah-wf-flow.is-warn{border-color:color-mix(in srgb,var(--ah-warn,#c80) 55%,transparent)}
+.ah-root .ah-wf-flow-head{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;background:none;border:0;color:inherit;cursor:pointer;text-align:left}
+.ah-root .ah-wf-flow-title{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ah-root .ah-wf-bar{width:110px;height:6px;border-radius:3px;background:color-mix(in srgb,currentColor 12%,transparent);overflow:hidden;flex-shrink:0}
+.ah-root .ah-wf-bar>span{display:block;height:100%;background:var(--ah-ok,#2a8a4a)}
+.ah-root .ah-wf-flow .ah-wf-tasks{padding:0 10px 8px}
+.ah-root .ah-wf-task{display:flex;align-items:center;gap:8px;padding:4px 6px 4px calc(6px + var(--ah-depth,0) * 16px);border-radius:6px;font-size:12.5px}
+.ah-root .ah-wf-task.is-blocked,.ah-root .ah-wf-task.is-triage{background:color-mix(in srgb,var(--ah-warn,#c80) 10%,transparent)}
+.ah-root .ah-wf-task.is-done{opacity:.7}
+.ah-root .ah-wf-tbody{flex:1;min-width:0;display:flex;flex-direction:column}
+.ah-root .ah-wf-ttitle{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ah-root .ah-wf-tline{opacity:.8;font-size:12px}
+.ah-root .ah-wf-tasks.is-compact .ah-inline-agent span{display:none}
+.ah-root .ah-wf-side{display:flex;flex-direction:column;gap:6px}
+.ah-root .ah-wf-hblog li{font-size:12px;padding:2px 0}
+.ah-root .ah-wf-done summary{cursor:pointer;padding:6px 2px;opacity:.8}
 .ah-root .ah-login-link{flex-basis:100%;font-size:12px;padding:4px 8px;border-radius:var(--ah-r-sm);background:var(--ah-surface-highest);user-select:all;word-break:break-all}
 .ah-root .ah-login-code{font-family:var(--ah-mono);font-size:18px;font-weight:700;letter-spacing:.12em;padding:2px 10px;border-radius:var(--ah-r-sm);background:var(--ah-surface-highest)}
 .ah-root .ah-login-log pre{max-height:160px;overflow:auto;font-size:11px;margin:4px 0 0;white-space:pre-wrap}

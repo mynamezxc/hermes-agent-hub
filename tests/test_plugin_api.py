@@ -1535,3 +1535,92 @@ class AccountRotationTest(unittest.TestCase):
         self.assertEqual(calls, [["auth", "remove", "openai-codex", "b"], ["auth", "priority", "openai-codex", "c", "0"]])
         self.assertEqual((r["switched_to"], r["removed"], r["accounts"]), ("c", ["b"], 2))
         self.assertTrue((self.m._hub_dir("") / "account-rotation.jsonl").exists())
+
+
+class WorkflowHeartbeatTest(unittest.TestCase):
+    """Workflow view (who does what, who waits on whom) and the token-free task heartbeat."""
+
+    def setUp(self):
+        root = FIX / "workflow"
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+        home = root / "home"
+        for p in ("manager", "tech-lead", "dev-backend", "dev-frontend"):
+            (home / "profiles" / p).mkdir(parents=True)
+        (home / "config.yaml").write_text("model:\n  default: m\n  provider: anthropic\n", encoding="utf-8")
+        (home / "agents-hub").mkdir(parents=True, exist_ok=True)
+        (home / "agents-hub" / "team.json").write_text(json.dumps({"version": 1, "agents": {
+            "default": {"name": "CEO", "reports_to": "Owner"}, "manager": {"name": "PM", "reports_to": "default"},
+            "tech-lead": {"name": "TL", "reports_to": "manager"}, "dev-backend": {"name": "BE", "reports_to": "tech-lead"},
+            "dev-frontend": {"name": "FE", "reports_to": "tech-lead"}}}), encoding="utf-8")
+        now = time.time()
+        self.now = now
+        ins = ("INSERT INTO tasks (id,title,assignee,status,created_by,created_at,completed_at,block_kind,last_heartbeat_at) "
+               "VALUES (?,?,?,?,?,?,?,?,?)")
+        link = "INSERT INTO task_links (parent_id, child_id) VALUES (?,?)"
+        ev = "INSERT INTO task_events (task_id,kind,payload,created_at) VALUES (?,?,?,?)"
+        make_db(home / "kanban.db", "kanban.db", [
+            # tech-lead delegated API (backend, done) and UI (frontend, running); its own merge card waits on both
+            (ins, ("api", "Build API", "dev-backend", "done", "tech-lead", int(now - 3000), int(now - 600), None, None)),
+            (ins, ("ui", "Build UI", "dev-frontend", "running", "tech-lead", int(now - 3000), None, None, int(now - 30))),
+            (ins, ("merge", "Merge and report", "tech-lead", "todo", "tech-lead", int(now - 3000), None, None, None)),
+            (link, ("api", "merge")), (link, ("ui", "merge")),
+            # backend finished a card the manager delegated, nothing planned on it yet -> report up
+            (ins, ("spec", "Write spec", "dev-backend", "done", "manager", int(now - 2000), int(now - 300), None, None)),
+            # frontend blocked on a question to its delegator (tech-lead)
+            (ins, ("q", "Pick a chart lib", "dev-frontend", "blocked", "tech-lead", int(now - 2000), None, "needs_input", None)),
+            (ev, ("q", "blocked", json.dumps({"reason": "Which chart library?"}), int(now - 900))),
+            # a todo whose parent is already done -> promote
+            (ins, ("docs", "Write docs", "dev-backend", "todo", "tech-lead", int(now - 2000), None, None, None)),
+            (link, ("spec", "docs")),
+            (ins, ("own", "Sếp card", "manager", "blocked", "manager", int(now - 2000), None, "needs_input", None)),
+            (ev, ("own", "blocked", json.dumps({"reason": "Cần Sếp duyệt chi tiền"}), int(now - 800))),
+            (ev, ("ui", "heartbeat", json.dumps({"note": "2/3 screens"}), int(now - 30))),
+        ])
+        make_db(home / "state.db", "state.db", [])
+        os.environ["HERMES_HOME"] = str(home)
+        spec = importlib.util.spec_from_file_location("agents_hub_api_workflow", API)
+        self.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.m)
+
+    def test_snapshot_shows_who_waits_on_whom(self):
+        s = self.m.workflow_snapshot(self.now)
+        lanes = {l["agent"]: l for l in s["agents"]}
+        tl = {w["who"]: w["tasks"] for w in lanes["tech-lead"]["waiting_for"]}
+        self.assertEqual(tl["dev-frontend"], ["q", "ui"])  # delegated and still open
+        self.assertEqual(lanes["dev-frontend"]["state"], "working")
+        self.assertIn("tech-lead", lanes["dev-frontend"]["waited_by"])
+        self.assertEqual(s["tasks"]["ui"]["progress"]["text"], "2/3 screens")
+        self.assertEqual(s["tasks"]["merge"]["open_parents"], ["ui"])
+        self.assertEqual(s["tasks"]["q"]["waiting_on"], "tech-lead")
+        self.assertEqual([t["id"] for t in s["owner_actions"]], ["own"])  # reason names the owner
+        flow = next(f for f in s["flows"] if "merge" in f["tasks"])
+        self.assertEqual((flow["final"], flow["done"], flow["total"]), ("merge", 1, 3))
+
+    def test_heartbeat_plan_promotes_answers_and_reports_up(self):
+        s = self.m.workflow_snapshot(self.now)
+        settings = {"auto_promote": True, "auto_answer_cards": True, "auto_report_up": True}
+        acts = self.m.plan_heartbeat(s, {"report_since": self.now - 7200}, self.now, settings)
+        kinds = {(a["do"], a.get("task") or a.get("agent")) for a in acts}
+        self.assertIn(("promote", "docs"), kinds)
+        self.assertIn(("answer", "q"), kinds)
+        report = next(a for a in acts if a["do"] == "report_up")
+        self.assertEqual((report["agent"], report["tasks"]), ("manager", ["spec"]))
+        # 'api' is covered by tech-lead's own follow-up card (merge waits on it): no extra review card
+        self.assertFalse(any(a["do"] == "report_up" and a["agent"] == "tech-lead" for a in acts))
+        # first run starts from now: the backlog is not flooded with old blocks / reports
+        none = self.m.plan_heartbeat(s, {"report_since": self.now}, self.now, settings)
+        self.assertEqual({a["do"] for a in none}, {"promote"})
+
+    def test_run_heartbeat_applies_once(self):
+        calls = []
+        self.m._run_hermes = lambda args: calls.append(args) or 0
+        self.m._write_json(self.m._hub_dir("") / "task-heartbeat.json", {"report_since": self.now - 7200})
+        self.m.run_heartbeat()
+        n = len(calls)
+        self.assertTrue(any(c[:2] == ["kanban", "promote"] for c in calls))
+        made = [c for c in calls if c[:2] == ["kanban", "create"]]
+        self.assertTrue(all("--created-by" in c and c[c.index("--created-by") + 1] == "agents-hub" for c in made))
+        self.assertEqual({c[c.index("--assignee") + 1] for c in made}, {"tech-lead", "manager"})
+        self.m.run_heartbeat()  # same board again: nothing new
+        self.assertEqual(len(calls), n)

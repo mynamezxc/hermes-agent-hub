@@ -42,8 +42,8 @@ approvals. Create cards with `kanban_create`:
 
 ## 3. While you work a card: be visible
 
-- `kanban_heartbeat` with a short note at each milestone ("3/8 articles written", "tests running"). The Hub shows it
-  as "what X is doing now".
+- `kanban_heartbeat` **with a short note** at each milestone ("3/8 articles written", "tests running"). The Hub's
+  Workflow tab and the delegator's chat panel show the note as your progress; a heartbeat without a note shows nothing.
 - Talk on the card with `kanban_comment`: questions to the card's creator, findings a reviewer needs, a hand-over note.
   Mention the other agent by id (`@qa`). Comments are the team's conversation, and the Hub lists them per card.
 - Put large outputs in files (`shared/files/` or the card's output path) and **comment the path**, not the content.
@@ -75,6 +75,15 @@ then `kanban_unblock`.
 
 ## 6. Follow up and accept (for the creator)
 
+- **Give several cards at once and wait on a condition.** Create the cards for your reports, then create ONE card for
+  yourself with `parents` = those cards (e.g. "Merge API + UI and report to manager"). It stays in todo and starts
+  by itself when every parent is done. That is how a superior "waits for A and B, then continues"; never poll.
+- If you did not plan a follow-up, the Hub task heartbeat gives you a card "Nghiệm thu N thẻ cấp dưới…" when your
+  reports finish. Review the real output, comment "nghiệm thu" or create a fix card, plan the next step, then complete
+  it with a report your own superior can read.
+- A report blocked on a question for you gets a card "Trả lời @…". Answer on the blocked card, `kanban_unblock` it,
+  then complete the answer card. What only the owner can decide (money, publishing, secrets, new access): say so on
+  the card and leave it waiting on the owner. The Hub lists it under "Waiting on you".
 - Track each hand-off as one of your goals. Mark it `done` only after you checked the real output (files, tests,
   logs). Do not trust self-reports.
 - Not good enough: comment specific fixes or create a follow-up card. Still failing after two rounds: tell the owner.
