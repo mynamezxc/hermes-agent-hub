@@ -80,7 +80,8 @@ then `kanban_unblock`.
   by itself when every parent is done. That is how a superior "waits for A and B, then continues"; never poll.
 - If you did not plan a follow-up, the Hub task heartbeat gives you a card "Nghiệm thu N thẻ cấp dưới…" when your
   reports finish. Review the real output, comment "nghiệm thu" or create a fix card, plan the next step, then complete
-  it with a report your own superior can read.
+  it with a report your own superior can read. **Start the summary with `ĐẠT` or `KHÔNG ĐẠT`**: the Hub reads that
+  first sentence and shows "Accepted / Not accepted by <you>" on every card you reviewed.
 - A report blocked on a question for you gets a card "Trả lời @…". Answer on the blocked card, `kanban_unblock` it,
   then complete the answer card. What only the owner can decide (money, publishing, secrets, new access): say so on
   the card and leave it waiting on the owner. The Hub lists it under "Waiting on you".

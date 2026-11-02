@@ -27,7 +27,7 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.19'
+const PLUGIN_VERSION = '1.6.20'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
@@ -3371,7 +3371,7 @@ function taskLine(s, wf, t) {
   }
 
   if (t.status === 'done') {
-    return `Done ${relTime(t.completed_at, s.now)}${t.superior && t.superior !== t.assignee ? ` · reported to ${agentName(s, t.superior)}` : ''}`
+    return t.summary || `Done ${relTime(t.completed_at, s.now)}${t.superior && t.superior !== t.assignee ? ` · reported to ${agentName(s, t.superior)}` : ''}`
   }
 
   return t.last_comment ? `${agentName(s, t.last_comment.author)}: ${t.last_comment.text}` : ''
@@ -3389,6 +3389,7 @@ function TaskRow({ s, wf, t, depth = 0 }) {
       h('span', { className: 'ah-wf-tline', title: taskLine(s, wf, t) }, taskLine(s, wf, t))
     ),
     t.assignee ? h('span', { className: 'ah-inline-agent', title: agentName(s, t.assignee) }, h(Avatar, { id: t.assignee, name: agentName(s, t.assignee), size: 20 }), h('span', null, agentName(s, t.assignee))) : null,
+    t.acceptance ? h(VerdictChip, { v: t.acceptance, by: t.accepted_by, s }) : t.status === 'done' && t.verdict ? h(VerdictChip, { v: t.verdict, s }) : null,
     h(StatusChip, { status: t.stalled ? 'stopped' : t.status })
   )
 }
@@ -3946,11 +3947,13 @@ const AUTO_ICON = {
   'Background task result': 'organization',
   'Model switch': 'hubot',
   'Scheduled job': 'history',
-  'Context compacted': 'fold'
+  'Context compacted': 'fold',
+  'Kanban task': 'tasklist'
 }
 
 // Fallback when the backend is older than the `auto` field: same prefixes as plugin_api.auto_label.
 const AUTO_PREFIXES = [
+  ['# Kanban task', 'Kanban task'],
   ['[CONTEXT COMPACTION', 'Context compacted'],
   ['[IMPORTANT: Background process', 'Background process finished'],
   ['[IMPORTANT:', 'System notice'],
@@ -3979,8 +3982,77 @@ function autoOf(m) {
 // collapsed by default, clearly tagged, never styled like the owner's own bubble.
 const COMPACTION_LABEL = 'Context compacted'
 
+// Verdict of a finished card (review cards complete with ĐẠT / KHÔNG ĐẠT …) and the acceptance shown on the
+// cards a superior reviewed.
+const VERDICT = {
+  pass: { tone: 'ok', icon: 'pass-filled', label: 'Accepted' },
+  fail: { tone: 'err', icon: 'error', label: 'Not accepted' },
+  answered: { tone: 'info', icon: 'comment', label: 'Answered' },
+  owner: { tone: 'warn', icon: 'bell', label: 'Needs owner' },
+  pending: { tone: 'neutral', icon: 'clock', label: 'In review' }
+}
+
+function VerdictChip({ v, by, s }) {
+  const meta = VERDICT[v]
+
+  return meta ? h(Chip, { tone: meta.tone, icon: meta.icon, title: by ? `${meta.label} by ${agentName(s, by)}` : meta.label }, by && v !== 'pending' ? `${meta.label} · ${agentName(s, by)}` : meta.label) : null
+}
+
+// Older gateways send the raw worker prompt: read the card id/title (and its body) from it.
+function kanbanHead(m) {
+  const text = String(m.content || '')
+  const hit = /^#\s*Kanban task\s+(t_[0-9a-f]+)\s*:\s*(.+)$/m.exec(text)
+
+  if (!hit) {
+    return null
+  }
+
+  if (!m.kanban_body && text.includes('## Body')) {
+    m.kanban_body = text.split('## Body')[1].replace(/\n\s*work kanban task t_[0-9a-f]+\s*$/, '').trim()
+  }
+
+  return { id: hit[1], title: hit[2].trim() }
+}
+
+// The prompt a Kanban worker received, shown as one compact task card (the owner never typed it).
+function KanbanMessage({ m, s }) {
+  const [open, setOpen] = useState(false)
+  const k = m.kanban
+  const wf = wfData(s)
+  const t = wf && wf.tasks[k.id]
+  const id = `ah-kb-${m.session_id || ''}-${m.id}`
+  const status = t ? (t.stalled ? 'stopped' : t.status) : null
+  const verdict = t && t.status === 'done' ? t.verdict || (t.review ? 'pass' : null) : null
+
+  return h(
+    'div',
+    { className: cx('ah-kbmsg', status && `is-${status}`, verdict && `v-${verdict}`) },
+    h(
+      'button',
+      { type: 'button', className: 'ah-kbmsg-head ah-state', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': id, title: 'Kanban task the agent picked up (not typed by you)', onClick: () => setOpen(!open) },
+      h('span', { className: 'ah-kbmsg-icon' }, h(Icon, { name: t && t.review ? 'checklist' : 'tasklist', size: 16 })),
+      h(
+        'span',
+        { className: 'ah-kbmsg-main' },
+        h('span', { className: 'ah-kbmsg-kicker' }, t && t.review ? 'Review task' : 'Kanban task', h('code', null, k.id), t && t.created_by ? h('span', null, `from ${t.created_by === 'agents-hub' ? 'Hub heartbeat' : agentName(s, t.created_by)}`) : null),
+        h('span', { className: 'ah-kbmsg-title' }, k.title),
+        t && t.summary ? h('span', { className: 'ah-kbmsg-result', title: t.summary }, t.summary) : t && t.progress && t.status === 'running' ? h('span', { className: 'ah-kbmsg-result' }, t.progress.text) : null
+      ),
+      h('span', { className: 'ah-kbmsg-side' }, verdict ? h(VerdictChip, { v: verdict, s }) : status ? h(StatusChip, { status }) : null, m.timestamp ? h('time', { className: 'ah-automsg-time', title: absTime(m.timestamp) }, relTime(m.timestamp, s.now)) : null),
+      h(Icon, { name: open ? 'chevron-up' : 'chevron-down', size: 14, className: 'ah-kbmsg-caret' })
+    ),
+    open ? h('div', { id, className: 'ah-kbmsg-body' }, m.kanban_body ? h(Markdown, { text: m.kanban_body }) : h('pre', { className: 'ah-tc-pre ah-mono' }, m.content || '')) : null
+  )
+}
+
 function AutoMessage({ m, s }) {
   const [open, setOpen] = useState(false)
+
+  const kb = m.kanban || kanbanHead(m)
+
+  if (kb) {
+    return h(KanbanMessage, { m: { ...m, kanban: kb }, s })
+  }
 
   // Context compaction: one quiet line, nothing to expand (the summary is for the model, not the owner).
   if (m.auto === COMPACTION_LABEL) {
@@ -8519,6 +8591,23 @@ const CSS = `
 .ah-root .ah-wf-side{display:flex;flex-direction:column;gap:6px}
 .ah-root .ah-wf-hblog li{font-size:12px;padding:2px 0}
 .ah-root .ah-wf-done summary{cursor:pointer;padding:6px 2px;opacity:.8}
+.ah-root .ah-kbmsg{border:1px solid var(--ah-line,rgba(127,127,127,.25));border-left:3px solid var(--ah-info,#3b82f6);border-radius:10px;background:color-mix(in srgb,var(--ah-info,#3b82f6) 4%,transparent);max-width:min(720px,100%);overflow:hidden}
+.ah-root .ah-kbmsg.is-done{border-left-color:var(--ah-ok,#2a8a4a)}
+.ah-root .ah-kbmsg.v-fail{border-left-color:var(--ah-err,#c33)}
+.ah-root .ah-kbmsg.is-blocked{border-left-color:var(--ah-warn,#c80)}
+.ah-root .ah-kbmsg-head{display:flex;align-items:flex-start;gap:10px;width:100%;padding:10px 12px;background:none;border:0;color:inherit;text-align:left;cursor:pointer}
+.ah-root .ah-kbmsg-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:8px;flex-shrink:0;background:color-mix(in srgb,currentColor 8%,transparent)}
+.ah-root .ah-kbmsg-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.ah-root .ah-kbmsg-kicker{display:flex;align-items:center;gap:6px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;opacity:.7}
+.ah-root .ah-kbmsg-kicker code{font-size:11px;text-transform:none;letter-spacing:0;padding:0 4px;border-radius:4px;background:color-mix(in srgb,currentColor 8%,transparent)}
+.ah-root .ah-kbmsg-kicker span{text-transform:none;letter-spacing:0}
+.ah-root .ah-kbmsg-title{font-weight:600;font-size:13.5px;line-height:1.35}
+.ah-root .ah-kbmsg-result{font-size:12.5px;opacity:.85;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ah-root .ah-kbmsg-side{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0}
+.ah-root .ah-kbmsg-caret{opacity:.6;margin-top:6px}
+.ah-root .ah-kbmsg-body{padding:4px 14px 12px 50px;font-size:13px;border-top:1px solid var(--ah-line,rgba(127,127,127,.18))}
+.ah-root .ah-kbmsg-body table{border-collapse:collapse;margin:6px 0}
+.ah-root .ah-kbmsg-body th,.ah-root .ah-kbmsg-body td{border:1px solid var(--ah-line,rgba(127,127,127,.25));padding:3px 8px;text-align:left}
 .ah-root .ah-login-link{flex-basis:100%;font-size:12px;padding:4px 8px;border-radius:var(--ah-r-sm);background:var(--ah-surface-highest);user-select:all;word-break:break-all}
 .ah-root .ah-login-code{font-family:var(--ah-mono);font-size:18px;font-weight:700;letter-spacing:.12em;padding:2px 10px;border-radius:var(--ah-r-sm);background:var(--ah-surface-highest)}
 .ah-root .ah-login-log pre{max-height:160px;overflow:auto;font-size:11px;margin:4px 0 0;white-space:pre-wrap}

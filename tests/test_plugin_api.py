@@ -17,6 +17,7 @@ from pathlib import Path
 REAL = Path(os.environ.get("AGENTS_HUB_REAL_HOME") or Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "hermes")
 FIX = Path(os.environ.get("AGENTS_HUB_FIXTURE_DIR") or REAL / "cache" / "scratch" / "agents-hub-test")
 API = Path(__file__).resolve().parent.parent / "dashboard" / "plugin_api.py"
+os.environ["AGENTS_HUB_NO_BACKGROUND"] = "1"  # tests drive the heartbeat/rotation directly
 
 
 def real_schema(rel: str) -> list[str]:
@@ -1579,6 +1580,7 @@ class WorkflowHeartbeatTest(unittest.TestCase):
         ])
         make_db(home / "state.db", "state.db", [])
         os.environ["HERMES_HOME"] = str(home)
+        self.home = home
         spec = importlib.util.spec_from_file_location("agents_hub_api_workflow", API)
         self.m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.m)
@@ -1624,3 +1626,77 @@ class WorkflowHeartbeatTest(unittest.TestCase):
         self.assertEqual({c[c.index("--assignee") + 1] for c in made}, {"tech-lead", "manager"})
         self.m.run_heartbeat()  # same board again: nothing new
         self.assertEqual(len(calls), n)
+
+
+class ReviewFlowTest(WorkflowHeartbeatTest):
+    """Report-ups are never repeated, a busy superior gets the next batch later, a review verdict shows on the
+    reviewed cards, and a Kanban worker prompt becomes a compact task card in the chat."""
+
+    def test_report_up_never_repeats_a_card(self):
+        s = self.m.workflow_snapshot(self.now)
+        st = {"report_since": self.now - 7200, "reported": ["spec"]}
+        acts = self.m.plan_heartbeat(s, st, self.now, {"auto_promote": False, "auto_answer_cards": False, "auto_report_up": True})
+        self.assertEqual(acts, [])  # 'spec' was reported already: no second review card with it inside
+
+    def test_busy_reviewer_gets_next_batch_later(self):
+        con = sqlite3.connect(self.home / "kanban.db")
+        con.execute("INSERT INTO tasks (id,title,assignee,status,created_by,created_at) VALUES "
+                    "('rv','Nghiệm thu: Build API','manager','running','agents-hub',?)", (int(self.now - 60),))
+        con.commit()
+        con.close()
+        s = self.m.workflow_snapshot(self.now)
+        acts = self.m.plan_heartbeat(s, {"report_since": self.now - 7200}, self.now,
+                                     {"auto_promote": False, "auto_answer_cards": False, "auto_report_up": True})
+        self.assertFalse(any(a["do"] == "report_up" and a["agent"] == "manager" for a in acts))
+
+    def test_run_records_reported_and_titles_name_the_work(self):
+        calls = []
+        self.m._run_hermes = lambda args: calls.append(args) or 0
+        self.m._write_json(self.m._hub_dir("") / "task-heartbeat.json", {"report_since": self.now - 7200})
+        self.m.run_heartbeat()
+        st = self.m._read_json(self.m._hub_dir("") / "task-heartbeat.json", {})
+        self.assertIn("spec", st["reported"])
+        titles = [c[2] for c in calls if c[:2] == ["kanban", "create"]]
+        self.assertIn("Nghiệm thu: Write spec", titles)
+
+    def test_verdict_and_acceptance_on_reviewed_cards(self):
+        self.assertEqual(self.m.verdict_of("**Kết quả:** Nghiệm thu t_1: ĐẠT 23/23"), "pass")
+        self.assertEqual(self.m.verdict_of("KHÔNG ĐẠT: 5 ảnh sai mẫu"), "fail")
+        self.assertEqual(self.m.verdict_of("CHỜ SẾP: cần duyệt chi tiền"), "owner")
+        self.assertIsNone(self.m.verdict_of("Đã xong bản nháp"))
+        con = sqlite3.connect(self.home / "kanban.db")
+        con.execute("INSERT INTO tasks (id,title,assignee,status,created_by,created_at,completed_at,idempotency_key) VALUES "
+                    "('rv2','Nghiệm thu: Write spec','manager','done','agents-hub',?,?,'hub-report-abc')",
+                    (int(self.now - 100), int(self.now - 10)))
+        con.execute("INSERT INTO task_events (task_id,kind,payload,created_at) VALUES ('rv2','completed',?,?)",
+                    (json.dumps({"summary": "ĐẠT: spec đủ 12 mục"}), int(self.now - 10)))
+        con.commit()
+        con.close()
+        (self.m._hub_dir("") / "task-heartbeat.jsonl").write_text(
+            json.dumps({"do": "report_up", "agent": "manager", "tasks": ["spec"], "key": "hub-report-abc"}) + "\n", encoding="utf-8")
+        s = self.m.workflow_snapshot(self.now)
+        self.assertEqual((s["tasks"]["spec"]["acceptance"], s["tasks"]["spec"]["accepted_by"]), ("pass", "manager"))
+        self.assertEqual(s["tasks"]["rv2"]["verdict"], "pass")
+        self.assertTrue(s["tasks"]["rv2"]["review"])
+
+    def test_kanban_prompt_becomes_task_card(self):
+        content = ("# Kanban task t_f0708060: Nghiệm thu 1 thẻ cấp dưới\n\nAssignee: default\nStatus:   running\n"
+                   "Workspace: scratch @ C:/x\n\n## Body\n**Cấp dưới đã xong.**\n\n| Thẻ | Người |\n\n\nwork kanban task t_f0708060")
+        m = self.m._shape_message({"id": 1, "role": "user", "content": content, "timestamp": 1}, "default", "owner")
+        self.assertEqual(m["auto"], "Kanban task")
+        self.assertEqual(m["kanban"], {"id": "t_f0708060", "title": "Nghiệm thu 1 thẻ cấp dưới"})
+        self.assertTrue(m["kanban_body"].startswith("**Cấp dưới đã xong.**"))
+        self.assertNotIn("Workspace", m["kanban_body"])
+        self.assertNotIn("work kanban task", m["kanban_body"])
+
+    def test_verdict_reads_the_conclusion_not_quoted_cards(self):
+        self.assertEqual(self.m.verdict_of("Đã nghiệm thu cả 4 thẻ. t_c8 (IMG-QA3) FAIL 8/9, đã giao IMG-FIX3."), "pass")
+        self.assertEqual(self.m.verdict_of("Kết quả: KHÔNG ĐẠT. Ảnh 3 lệch mẫu."), "fail")
+
+    def test_one_heartbeat_per_home(self):
+        lock = self.m._hub_dir("") / "task-heartbeat.lock"
+        self.m._write_json(lock, {"pid": 999999, "at": time.time()})
+        self.assertFalse(self.m._hb_lease())  # another live process holds it
+        self.m._write_json(lock, {"pid": 999999, "at": time.time() - 3600})
+        self.assertTrue(self.m._hb_lease())  # stale lease: take over
+        self.assertTrue(self.m._hb_lease())  # ours: keep going

@@ -705,7 +705,10 @@ AUTO_KINDS = {
     "auto_continue": "Agent continued on its own",
     "hidden": "System note",
 }
+KANBAN_LABEL = "Kanban task"
+_KANBAN_HEAD = re.compile(r"^#\s*Kanban task\s+(t_[0-9a-f]+)\s*:\s*(.+)$", re.M)
 _AUTO_PREFIXES = (
+    ("# Kanban task", KANBAN_LABEL),
     ("[CONTEXT COMPACTION", "Context compacted"),
     ("[IMPORTANT: Background process", "Background process finished"),
     ("[IMPORTANT:", "System notice"),
@@ -751,7 +754,21 @@ def _shape_message(r: dict[str, Any], profile: str, owner: str) -> dict[str, Any
         text = meta.get("display_text") if isinstance(meta, dict) else None
         out["auto"] = label
         out["auto_summary"] = redact(_clip(" ".join(str(text or content).split()), 200))
+        if label == KANBAN_LABEL:
+            out.update(_kanban_prompt(content))
     return out
+
+
+def _kanban_prompt(content: str) -> dict[str, Any]:
+    """The prompt a Kanban worker receives: card id, title and the card's own body (no worker boilerplate),
+    so the chat shows a compact task card instead of a wall of text the owner never typed."""
+    m = _KANBAN_HEAD.search(content or "")
+    if not m:
+        return {}
+    body = content.split("## Body", 1)[1] if "## Body" in content else ""
+    body = re.sub(r"\n\s*work kanban task t_[0-9a-f]+\s*$", "", body.strip())
+    return {"kanban": {"id": m.group(1), "title": m.group(2).strip()}, "auto_summary": m.group(2).strip(),
+            "kanban_body": redact(_clip(body, 4000))}
 
 
 def _messages_session(profile: str, session_id: str, limit: int, owner: str,
@@ -994,7 +1011,7 @@ OPEN = {"todo", "ready", "running", "blocked", "triage", "review", "scheduled"}
 def _workflow_rows(now: float) -> dict[str, Any]:
     db = _kanban_db()
     rows = query(db, "SELECT id, title, status, assignee, created_by, created_at, started_at, completed_at, "
-                     "last_heartbeat_at, worker_pid, block_kind, priority FROM tasks WHERE status != 'archived' "
+                     "last_heartbeat_at, worker_pid, block_kind, priority, idempotency_key FROM tasks WHERE status != 'archived' "
                      "AND (status != 'done' OR completed_at > ?)", (now - WORKFLOW_DAYS * 86400,))
     tasks = {r["id"]: r for r in rows}
     status_all = {r["id"]: r["status"] for r in query(db, "SELECT id, status FROM tasks")}
@@ -1012,8 +1029,30 @@ def _workflow_rows(now: float) -> dict[str, Any]:
         db, "SELECT task_id, payload, MAX(created_at) AS t FROM task_events WHERE kind = 'blocked' GROUP BY task_id")}
     last_cm = {r["task_id"]: r for r in query(
         db, "SELECT task_id, author, body, MAX(created_at) AS t FROM task_comments GROUP BY task_id")}
+    dones = {r["task_id"]: r for r in query(
+        db, "SELECT task_id, payload, MAX(created_at) AS t FROM task_events WHERE kind = 'completed' GROUP BY task_id")}
     return {"tasks": tasks, "status": status_all, "parents": parents, "children": children, "beats": beats,
-            "blocks": blocks, "last_cm": last_cm}
+            "blocks": blocks, "last_cm": last_cm, "dones": dones}
+
+
+def verdict_of(summary: Any) -> Optional[str]:
+    """pass / fail / answered / owner from a completion summary (review cards start with ĐẠT / KHÔNG ĐẠT)."""
+    s = " ".join(str(summary or "").replace("*", " ").split()).upper()
+    s = re.sub(r"^(KẾT QUẢ|KẾT LUẬN|RESULT)\s*:\s*", "", s)
+    if not s:
+        return None
+    if s.startswith("CHỜ SẾP"):
+        return "owner"
+    if s.startswith("ĐÃ TRẢ LỜI"):
+        return "answered"
+    # the conclusion is the first sentence; later sentences may quote other cards ("QA3 FAIL, fixed by …")
+    head = re.split(r"(?<=[.!?;])\s", s, maxsplit=1)[0][:160]
+    for text in (head, s):
+        if re.search(r"KHÔNG\s+ĐẠT|CHƯA\s+ĐẠT|\bFAIL(ED)?\b", text):
+            return "fail"
+        if re.search(r"\bĐẠT\b|\bPASS(ED)?\b|NGHIỆM THU", text):
+            return "pass"
+    return None
 
 
 def _superior(tid: str, w: dict[str, Any], agents: set[str], seen: Optional[set[str]] = None) -> Optional[str]:
@@ -1065,6 +1104,15 @@ def _task_view(tid: str, w: dict[str, Any], agents: set[str], now: float) -> dic
     if cm:
         item["last_comment"] = {"author": cm.get("author"), "at": _num(cm.get("t")),
                                 "text": redact(_clip(" ".join(str(cm.get("body") or "").split()), 200))}
+    if t.get("status") == "done":
+        try:
+            summ = (json.loads((w["dones"].get(tid) or {}).get("payload") or "{}") or {}).get("summary")
+        except (ValueError, AttributeError):
+            summ = None
+        if summ:
+            item["summary"] = redact(_clip(" ".join(str(summ).replace("**", "").split()), 300))
+            item["verdict"] = verdict_of(summ)
+    item["review"] = t.get("created_by") == "agents-hub" and str(t.get("title") or "").startswith(REVIEW_TITLE)
     if t.get("status") == "blocked":
         item.update(_block_info(t, w["blocks"].get(tid), sup))
     if t.get("status") in ("todo", "triage"):
@@ -1134,6 +1182,33 @@ def _agent_lanes(items: dict[str, dict[str, Any]], agents: list[str]) -> list[di
     return lanes
 
 
+def _review_map() -> dict[str, list[str]]:
+    """idempotency key of each review card the heartbeat created → the cards it asked to review."""
+    out: dict[str, list[str]] = {}
+    try:
+        for line in (_hub_dir("") / "task-heartbeat.jsonl").read_text(encoding="utf-8").splitlines():
+            e = json.loads(line)
+            if e.get("do") == "report_up" and e.get("key"):
+                out[e["key"]] = list(e.get("tasks") or [])
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def _link_reviews(items: dict[str, dict[str, Any]], w: dict[str, Any]) -> None:
+    """Show the superior's verdict on the reviewed cards themselves: "Accepted by CEO" / "Rejected"."""
+    keys = _review_map()
+    cards = sorted((t for t in items.values() if t.get("review")), key=lambda t: t.get("completed_at") or t["created_at"] or 0)
+    for card in cards:
+        ids = keys.get((w["tasks"].get(card["id"]) or {}).get("idempotency_key") or "", [])
+        card["reviews"] = ids
+        for i in ids:
+            if i in items:
+                items[i]["review_card"] = card["id"]
+                items[i]["acceptance"] = (card.get("verdict") or "pass") if card["status"] == "done" else "pending"
+                items[i]["accepted_by"] = card.get("assignee")
+
+
 def workflow_snapshot(now: Optional[float] = None) -> dict[str, Any]:
     now = now or time.time()
     w = _workflow_rows(now)
@@ -1143,6 +1218,7 @@ def workflow_snapshot(now: Optional[float] = None) -> dict[str, Any]:
     lanes = _agent_lanes(items, agent_ids)
     for lane in lanes:  # who waits on me
         lane["waited_by"] = sorted({o["agent"] for o in lanes for wf in o["waiting_for"] if wf["who"] == lane["agent"]})
+    _link_reviews(items, w)
     owner = [t for t in items.values() if t["status"] == "blocked" and t.get("waiting_on") == "owner"]
     return {"at": now, "tasks": items, "flows": _flows(items), "agents": lanes,
             "owner_actions": sorted(owner, key=lambda t: t.get("blocked_at") or 0),
@@ -1161,6 +1237,7 @@ def workflow() -> dict[str, Any]:
 # delegated card is done and its superior has nothing planned on it, the superior gets ONE "review the report
 # and continue" card. Cards it creates are authored by `agents-hub`, so they never trigger further report-ups.
 HB_EVERY_S = 60
+REVIEW_TITLE = "Nghiệm thu"
 HB_PROMOTE_AFTER_S = 120
 HB_ANSWER_AFTER_S = 5 * 60
 HB_LOG_MAX = 300
@@ -1226,11 +1303,16 @@ def plan_heartbeat(snap: dict[str, Any], state: dict[str, Any], now: float, sett
                 actions.append({"do": "answer", "task": t["id"], "agent": who, "key": f"hub-answer-{t['id']}-{int(since)}"})
     if settings["auto_report_up"]:
         since = state.get("report_since") or now
+        reported = set(state.get("reported") or [])
+        # a superior still busy with a review card gets the next batch after it, not a duplicate now
+        reviewing = {t["assignee"] for t in items.values() if t["created_by"] == "agents-hub"
+                     and t["status"] in OPEN and str(t["title"]).startswith(REVIEW_TITLE)}
         per: dict[str, list[str]] = {}
         for t in items.values():
             sup = t["superior"]
-            if (t["status"] != "done" or not sup or sup == t["assignee"] or sup not in agents
-                    or (t.get("completed_at") or 0) <= since or t["created_by"] == "agents-hub"):
+            if (t["status"] != "done" or not sup or sup == t["assignee"] or sup not in agents or sup in reviewing
+                    or t["id"] in reported or (t.get("completed_at") or 0) <= since
+                    or t["created_by"] == "agents-hub"):
                 continue
             planned = [c for c in t["children"] if (items.get(c) or {}).get("assignee") == sup]
             if not planned:  # the superior has no follow-up card waiting on this one
@@ -1243,30 +1325,38 @@ def plan_heartbeat(snap: dict[str, Any], state: dict[str, Any], now: float, sett
 
 
 def _answer_body(t: dict[str, Any]) -> str:
-    return (f"@{t['assignee']} đang bị chặn trên thẻ {t['id']} ({t['title']}) và chờ BẠN, người giao việc, quyết định.\n\n"
-            f"Lý do chặn: {t.get('block_reason') or '(xem thẻ)'}\n\n"
-            f"Việc cần làm:\n"
-            f"1. `kanban_show {t['id']}`: đọc comment cuối.\n"
-            f"2. Trả lời hoặc quyết định bằng `kanban_comment {t['id']}`. Trong phạm vi quyền của bạn thì quyết luôn. "
-            f"Việc cần Sếp (chi tiền, xuất bản, bí mật, quyền mới) thì ghi rõ trong comment và để thẻ chờ.\n"
-            f"3. Nếu đã gỡ được thì `kanban_unblock {t['id']}`.\n"
-            f"4. Complete thẻ này với 1 câu tóm tắt quyết định.")
+    return "\n".join([
+        f"**@{t['assignee']} đang chờ bạn quyết định** trên `{t['id']}`: {t['title']}",
+        "",
+        f"> {t.get('block_reason') or 'Xem comment cuối của thẻ.'}",
+        "",
+        "1. `kanban_show " + t["id"] + "`, đọc comment cuối.",
+        "2. Quyết định bằng `kanban_comment`. Việc chỉ Sếp quyết được (tiền, xuất bản, bí mật, quyền mới) thì ghi rõ và để thẻ chờ Sếp.",
+        "3. `kanban_unblock " + t["id"] + "` nếu đã gỡ được.",
+        "4. Complete thẻ này với summary: `ĐÃ TRẢ LỜI: <quyết định>` hoặc `CHỜ SẾP: <lý do>`.",
+    ])
+
+
+def _review_title(items: dict[str, dict[str, Any]], ids: list[str]) -> str:
+    first = (items.get(ids[0]) or {}).get("title") or ids[0]
+    more = f" (+{len(ids) - 1} thẻ)" if len(ids) > 1 else ""
+    return _clip(f"{REVIEW_TITLE}: {first}{more}", 140)
 
 
 def _report_body(items: dict[str, dict[str, Any]], ids: list[str]) -> str:
-    lines = ["Cấp dưới đã làm xong các thẻ bạn giao. Hãy nghiệm thu và quyết định bước tiếp:\n"]
-    for i in ids:
-        t = items.get(i) or {}
-        lines.append(f"- {i} @{t.get('assignee')}: {t.get('title')}")
-    lines += ["",
-              "Việc cần làm:",
-              "1. `kanban_show <id>` từng thẻ: đọc summary và artifacts, rồi KIỂM đầu ra thật (file, số liệu). Không tin "
-              "mỗi lời tự báo cáo.",
-              "2. Đạt thì comment \"nghiệm thu\" lên thẻ. Chưa đạt thì tạo thẻ sửa cụ thể giao lại cho người đó.",
-              "3. Bước tiếp theo: tạo thẻ mới. Việc phải chờ nhiều thẻ xong thì tạo thẻ có `parents` = các thẻ đó, "
-              "thẻ sẽ tự chạy khi chúng xong.",
-              "4. Cập nhật goal của bạn. Nếu đã đến lúc báo cấp trên thì ghi báo cáo vào summary khi complete thẻ này."]
-    return "\n".join(lines)
+    rows = [f"| `{i}` | @{(items.get(i) or {}).get('assignee')} | {_clip((items.get(i) or {}).get('title'), 90)} |" for i in ids]
+    return "\n".join([
+        "**Cấp dưới đã xong việc bạn giao. Hãy nghiệm thu và giao bước tiếp.**",
+        "",
+        "| Thẻ | Người làm | Việc |",
+        "|---|---|---|",
+        *rows,
+        "",
+        "1. `kanban_show` từng thẻ, kiểm đầu ra thật (file, số liệu). Không chỉ đọc lời tự báo cáo.",
+        "2. Đạt thì comment `NGHIỆM THU: ĐẠT`. Chưa đạt thì giao thẻ sửa cụ thể cho đúng người.",
+        "3. Việc tiếp theo phải chờ nhiều thẻ thì tạo thẻ có `parents` = các thẻ đó (tự chạy khi xong).",
+        "4. Complete thẻ này, summary bắt đầu bằng `ĐẠT` hoặc `KHÔNG ĐẠT`, kèm 1 câu kết luận.",
+    ])
 
 
 def run_heartbeat() -> dict[str, Any]:
@@ -1279,6 +1369,8 @@ def run_heartbeat() -> dict[str, Any]:
     if not settings["task_heartbeat"]:
         return {"enabled": False}
     snap = workflow_snapshot(now)
+    # cards already put in a review card (log of earlier runs, older versions included) are never reported again
+    state["reported"] = sorted(set(state.get("reported") or []).union(*_review_map().values()))[-3000:]
     actions = plan_heartbeat(snap, state, now, settings)
     done_keys = set(state.get("done_keys") or [])
     applied = []
@@ -1293,8 +1385,10 @@ def run_heartbeat() -> dict[str, Any]:
             t = snap["tasks"][a["task"]]
             ok = _create_card(a["agent"], _clip(f"Trả lời @{t['assignee']}: {t['title']}", 150), _answer_body(t), a["key"], priority=6)
         elif a["do"] == "report_up":
-            ok = _create_card(a["agent"], f"Nghiệm thu {len(a['tasks'])} thẻ cấp dưới đã xong và giao bước tiếp",
+            ok = _create_card(a["agent"], _review_title(snap["tasks"], a["tasks"]),
                               _report_body(snap["tasks"], a["tasks"]), a["key"], priority=5)
+            if ok:
+                state["reported"] = sorted(set(state.get("reported") or []) | set(a["tasks"]))[-3000:]
         if ok:
             done_keys.add(key)
             applied.append(a)
@@ -1317,19 +1411,32 @@ def _hb_public() -> dict[str, Any]:
             "log": list(reversed(log))}
 
 
-def _hb_loop() -> None:
+def _hb_lease() -> bool:
+    """One heartbeat per HERMES_HOME even when several processes load the plugin (desktop + dashboard)."""
+    path = _hub_dir("") / "task-heartbeat.lock"
+    now = time.time()
+    lease = _read_json(path, {})
+    if lease.get("pid") not in (None, os.getpid()) and now - float(lease.get("at") or 0) < 3 * HB_EVERY_S:
+        return False
+    _write_json(path, {"pid": os.getpid(), "at": now})
+    return True
+
+
+def _hb_loop(delay: float = 0) -> None:
+    time.sleep(delay)
     while True:
         try:
-            run_heartbeat()
+            if _hb_lease():
+                run_heartbeat()
         except Exception as e:  # never let the loop die
             _hb_last.update({"at": time.time(), "error": redact(str(e))[:200]})
         time.sleep(HB_EVERY_S)
 
 
-def _ensure_hb_thread() -> None:
+def _ensure_hb_thread(delay: float = 0) -> None:
     global _hb_thread
     if _hb_thread is None or not _hb_thread.is_alive():
-        _hb_thread = threading.Thread(target=_hb_loop, name="agents-hub-task-heartbeat", daemon=True)
+        _hb_thread = threading.Thread(target=_hb_loop, args=(delay,), name="agents-hub-task-heartbeat", daemon=True)
         _hb_thread.start()
 
 
@@ -3403,7 +3510,8 @@ def rotate_accounts(provider: str) -> dict[str, Any]:
         _rotation_lock.release()
 
 
-def _rotation_loop() -> None:
+def _rotation_loop(delay: float = 0) -> None:
+    time.sleep(delay)
     while True:
         if _rotation_enabled():
             for provider in HUB_PROVIDERS:
@@ -3415,10 +3523,11 @@ def _rotation_loop() -> None:
         time.sleep(ROTATE_EVERY_S)
 
 
-def _ensure_rotation_thread() -> None:
+def _ensure_rotation_thread(delay: float = 0) -> None:
     global _rotation_thread
     if _rotation_thread is None or not _rotation_thread.is_alive():
-        _rotation_thread = threading.Thread(target=_rotation_loop, name="agents-hub-account-rotation", daemon=True)
+        _rotation_thread = threading.Thread(target=_rotation_loop, args=(delay,), name="agents-hub-account-rotation",
+                                            daemon=True)
         _rotation_thread.start()
 
 
@@ -3707,3 +3816,16 @@ def usage(agent: str = Query("default"), wait: float = Query(0.0, ge=0, le=20)) 
                         "loading": bool(c.get("busy")) and not c.get("at"),
                         "rotation": _rotation_public(provider)})
     return {"agent": agent, "providers": out, "ttl": USAGE_TTL_S}
+
+
+def _start_background() -> None:
+    """Task heartbeat and account switching run as soon as Hermes loads the plugin, not only while the Hub page
+    is open and polling: work must keep moving with the window closed."""
+    if os.environ.get("AGENTS_HUB_NO_BACKGROUND") == "1":
+        return
+    # a short delay: one-shot imports (`hermes plugins validate`) exit before doing any work
+    _ensure_hb_thread(delay=30)
+    _ensure_rotation_thread(delay=45)
+
+
+_start_background()
