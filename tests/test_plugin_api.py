@@ -1700,3 +1700,15 @@ class ReviewFlowTest(WorkflowHeartbeatTest):
         self.m._write_json(lock, {"pid": 999999, "at": time.time() - 3600})
         self.assertTrue(self.m._hb_lease())  # stale lease: take over
         self.assertTrue(self.m._hb_lease())  # ours: keep going
+
+
+class CoworkMessageTest(WorkflowHeartbeatTest):
+    def test_cowork_relay_becomes_compact_card(self):
+        content = ('[Tin từ Claude Cowork — kênh file cowork/, thread "web-report"]\nBạn là Hermes ... quy tắc dài\n'
+                   '--- Tin của Cowork (20261103-2302-r05.md, 2026-11-03 22:26) ---\nCâu 4 — báo cáo website hằng ngày.\nChi tiết...')
+        m = self.m._shape_message({"id": 7, "role": "user", "content": content, "timestamp": 1}, "default", "owner")
+        self.assertEqual(m["auto"], "Claude Cowork")
+        self.assertEqual(m["cowork"], {"thread": "web-report", "file": "20261103-2302-r05.md", "at": "2026-11-03 22:26"})
+        self.assertEqual(m["auto_summary"], "Câu 4 — báo cáo website hằng ngày.")
+        self.assertTrue(m["cowork_body"].startswith("Câu 4"))
+        self.assertNotIn("quy tắc dài", m["cowork_body"])

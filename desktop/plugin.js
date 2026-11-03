@@ -27,7 +27,7 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.20'
+const PLUGIN_VERSION = '1.6.21'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
@@ -3948,12 +3948,14 @@ const AUTO_ICON = {
   'Model switch': 'hubot',
   'Scheduled job': 'history',
   'Context compacted': 'fold',
-  'Kanban task': 'tasklist'
+  'Kanban task': 'tasklist',
+  'Claude Cowork': 'comment-discussion'
 }
 
 // Fallback when the backend is older than the `auto` field: same prefixes as plugin_api.auto_label.
 const AUTO_PREFIXES = [
   ['# Kanban task', 'Kanban task'],
+  ['[Tin từ Claude Cowork', 'Claude Cowork'],
   ['[CONTEXT COMPACTION', 'Context compacted'],
   ['[IMPORTANT: Background process', 'Background process finished'],
   ['[IMPORTANT:', 'System notice'],
@@ -4012,6 +4014,70 @@ function kanbanHead(m) {
   }
 
   return { id: hit[1], title: hit[2].trim() }
+}
+
+// Claude's mark (the orange spark), drawn inline so no asset is needed.
+function ClaudeMark({ size = 18 }) {
+  const rays = [0, 45, 90, 135, 180, 225, 270, 315]
+
+  return h(
+    'svg',
+    { className: 'ah-claude-mark', width: size, height: size, viewBox: '0 0 24 24', 'aria-hidden': 'true' },
+    rays.map(a => h('path', { key: a, d: 'M12 12 L12 2.6', stroke: '#D97757', strokeWidth: a % 90 ? 2.1 : 2.6, strokeLinecap: 'round', transform: `rotate(${a} 12 12)` }))
+  )
+}
+
+// Older gateways send the raw relay prompt: read the thread and Cowork's own words from it.
+function coworkOf(m) {
+  if (m.cowork) {
+    return { ...m.cowork, body: m.cowork_body || '' }
+  }
+
+  const text = String(m.content || '')
+  const t = /thread\s+"([^"]+)"/.exec(text)
+  const b = /^--- Tin của Cowork \(([^,)]*),?\s*([^)]*)\) ---\s*$/m.exec(text)
+
+  return { thread: t ? t[1] : '', file: b ? b[1] : '', at: b ? b[2] : '', body: b ? text.slice(b.index + b[0].length).trim() : text }
+}
+
+// A message Claude Cowork sent Hermes (file channel), with Hermes' answer folded in: one row, expandable,
+// and a link to the whole Cowork ↔ Hermes conversation.
+function CoworkMessage({ m, s, reply, steps, agent }) {
+  const [open, setOpen] = useState(false)
+  const c = coworkOf(m)
+  const id = `ah-cw-${m.session_id || ''}-${m.id}`
+  const first = (c.body.split('\n').find(l => l.trim()) || '').replace(/^#+\s*/, '')
+  const meta = (c.body.match(/^(request|status):\s*(.+)$/gm) || []).map(x => x.replace(/^\w+:\s*/, ''))
+
+  return h(
+    'div',
+    { className: cx('ah-cwmsg', open && 'is-open') },
+    h(
+      'button',
+      { type: 'button', className: 'ah-cwmsg-head ah-state', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': id, title: 'Claude Cowork ↔ Hermes (not typed by you)', onClick: () => setOpen(!open) },
+      h('span', { className: 'ah-cwmsg-icon' }, h(ClaudeMark, { size: 16 })),
+      h('b', { className: 'ah-cwmsg-who' }, 'Cowork'),
+      c.thread ? h('span', { className: 'ah-cwmsg-thread' }, `#${c.thread}`) : null,
+      meta.length ? h('span', { className: 'ah-cwmsg-thread' }, meta.join(' · ')) : null,
+      h('span', { className: 'ah-cwmsg-sum', title: first }, m.auto_summary || first),
+      reply ? h('span', { className: 'ah-cwmsg-replied', title: 'Hermes đã trả lời' }, h(Icon, { name: 'reply', size: 13 }), ' Hermes') : h('span', { className: 'ah-cwmsg-replied is-wait' }, 'chờ Hermes'),
+      m.timestamp ? h('time', { className: 'ah-automsg-time', title: absTime(m.timestamp) }, relTime(m.timestamp, s.now)) : null,
+      h(Icon, { name: open ? 'chevron-up' : 'chevron-down', size: 14, className: 'ah-kbmsg-caret' })
+    ),
+    open
+      ? h(
+          'div',
+          { id, className: 'ah-cwmsg-body' },
+          h('div', { className: 'ah-cwmsg-part' }, h('small', { className: 'ah-cwmsg-label' }, h(ClaudeMark, { size: 12 }), ` Claude Cowork${c.at ? ` · ${c.at}` : ''}`), h(Markdown, { text: c.body || '(trống)' })),
+          reply
+            ? h('div', { className: 'ah-cwmsg-part is-hermes' }, h('small', { className: 'ah-cwmsg-label' }, `Hermes trả lời${steps ? ` · ${steps} bước công cụ` : ''}`), h(Markdown, { text: reply }))
+            : null,
+          m.session_id
+            ? h('button', { type: 'button', className: 'ah-btn ah-btn-text ah-btn-sm ah-state', onClick: () => setUi({ tab: 'conversations', conv: { profile: agent, session_id: m.session_id } }) }, h(Icon, { name: 'comment-discussion', size: 14 }), ' Xem toàn bộ hội thoại Hermes ↔ Cowork')
+            : null
+        )
+      : null
+  )
 }
 
 // The prompt a Kanban worker received, shown as one compact task card (the owner never typed it).
@@ -4089,11 +4155,46 @@ function AutoMessage({ m, s }) {
 // mode 'agents': agent-to-agent transcript, everyone on the left with speaker avatars.
 function MessageStream({ s, entries, mode, agentId, info, renderEntry }) {
   const { blocks, resultById } = useMemo(() => buildBlocks(entries), [entries])
+  // Hermes' work and answer to a Cowork message (same session, until the next message from someone) fold into its card.
+  const folded = useMemo(() => {
+    const out = { skip: new Set(), reply: {} }
+
+    blocks.forEach((b, i) => {
+      if (b.kind !== 'user' || autoOf(b.m) !== 'Claude Cowork' || !b.m.session_id) {
+        return
+      }
+
+      const sid = `${b.m.session_id}:`
+      let steps = 0
+      let text = ''
+
+      for (let j = i + 1; j < blocks.length; j++) {
+        const n = blocks[j]
+
+        if (!['assistant', 'tools', 'orphan'].includes(n.kind) || !String(n.key).slice(2).startsWith(sid)) {
+          if (n.kind === 'user') break
+          continue
+        }
+
+        out.skip.add(j)
+        if (n.kind === 'tools') steps += n.calls.length
+        if (n.kind === 'assistant') text = n.m.content
+      }
+
+      out.reply[i] = { text, steps }
+    })
+
+    return out
+  }, [blocks])
 
   return h(
     'ol',
     { className: cx('ah-stream', `is-${mode}`) },
     blocks.map((b, i) => {
+      if (folded.skip.has(i)) {
+        return null
+      }
+
       if (b.kind === 'work') {
         return h('li', { key: b.key, className: 'ah-stream-item is-agent is-work' }, renderEntry ? renderEntry(b) : null)
       }
@@ -4113,6 +4214,12 @@ function MessageStream({ s, entries, mode, agentId, info, renderEntry }) {
       const m = b.m
 
       const auto = b.kind === 'user' ? autoOf(m) : null
+
+      if (auto === 'Claude Cowork') {
+        const rep = folded.reply[i] || {}
+
+        return h('li', { key: b.key, className: 'ah-stream-item is-auto' }, h('span', { className: 'ah-av-gap' }), h(CoworkMessage, { m, s, reply: rep.text, steps: rep.steps, agent: agentId }))
+      }
 
       if (auto) {
         return h('li', { key: b.key, className: 'ah-stream-item is-auto' }, h('span', { className: 'ah-av-gap' }), h(AutoMessage, { m: { ...m, auto }, s }))
@@ -8591,6 +8698,17 @@ const CSS = `
 .ah-root .ah-wf-side{display:flex;flex-direction:column;gap:6px}
 .ah-root .ah-wf-hblog li{font-size:12px;padding:2px 0}
 .ah-root .ah-wf-done summary{cursor:pointer;padding:6px 2px;opacity:.8}
+.ah-root .ah-cwmsg{border:1px solid var(--ah-line,rgba(127,127,127,.25));border-left:3px solid #D97757;border-radius:10px;background:color-mix(in srgb,#D97757 5%,transparent);max-width:min(760px,100%);overflow:hidden}
+.ah-root .ah-cwmsg-head{display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;background:none;border:0;color:inherit;text-align:left;cursor:pointer;min-width:0}
+.ah-root .ah-cwmsg-icon{display:grid;place-items:center;width:24px;height:24px;border-radius:7px;flex-shrink:0;background:color-mix(in srgb,#D97757 14%,transparent)}
+.ah-root .ah-cwmsg-who{font-size:13px;flex-shrink:0}
+.ah-root .ah-cwmsg-thread{font-size:11.5px;padding:1px 6px;border-radius:6px;background:color-mix(in srgb,currentColor 8%,transparent);flex-shrink:0;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis}
+.ah-root .ah-cwmsg-sum{flex:1;min-width:0;font-size:13px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ah-root .ah-cwmsg-replied{display:inline-flex;align-items:center;gap:2px;font-size:11.5px;flex-shrink:0;color:var(--ah-ok,#2a8a4a)}
+.ah-root .ah-cwmsg-replied.is-wait{color:var(--ah-warn,#c80)}
+.ah-root .ah-cwmsg-body{padding:6px 14px 12px 42px;border-top:1px solid var(--ah-line,rgba(127,127,127,.18));display:flex;flex-direction:column;gap:10px;font-size:13px}
+.ah-root .ah-cwmsg-part.is-hermes{border-left:2px solid var(--ah-info,#3b82f6);padding-left:10px}
+.ah-root .ah-cwmsg-label{display:flex;align-items:center;gap:4px;opacity:.7;margin-bottom:2px}
 .ah-root .ah-kbmsg{border:1px solid var(--ah-line,rgba(127,127,127,.25));border-left:3px solid var(--ah-info,#3b82f6);border-radius:10px;background:color-mix(in srgb,var(--ah-info,#3b82f6) 4%,transparent);max-width:min(720px,100%);overflow:hidden}
 .ah-root .ah-kbmsg.is-done{border-left-color:var(--ah-ok,#2a8a4a)}
 .ah-root .ah-kbmsg.v-fail{border-left-color:var(--ah-err,#c33)}

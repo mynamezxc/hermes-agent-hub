@@ -706,9 +706,13 @@ AUTO_KINDS = {
     "hidden": "System note",
 }
 KANBAN_LABEL = "Kanban task"
+COWORK_LABEL = "Claude Cowork"
+_COWORK_HEAD = re.compile(r'^\[Tin từ Claude Cowork[^\]]*thread\s+"([^"]+)"', re.M)
+_COWORK_BODY = re.compile(r"^--- Tin của Cowork \(([^,)]*),?\s*([^)]*)\) ---\s*$", re.M)
 _KANBAN_HEAD = re.compile(r"^#\s*Kanban task\s+(t_[0-9a-f]+)\s*:\s*(.+)$", re.M)
 _AUTO_PREFIXES = (
     ("# Kanban task", KANBAN_LABEL),
+    ("[Tin từ Claude Cowork", COWORK_LABEL),
     ("[CONTEXT COMPACTION", "Context compacted"),
     ("[IMPORTANT: Background process", "Background process finished"),
     ("[IMPORTANT:", "System notice"),
@@ -756,7 +760,22 @@ def _shape_message(r: dict[str, Any], profile: str, owner: str) -> dict[str, Any
         out["auto_summary"] = redact(_clip(" ".join(str(text or content).split()), 200))
         if label == KANBAN_LABEL:
             out.update(_kanban_prompt(content))
+        elif label == COWORK_LABEL:
+            out.update(_cowork_prompt(content))
     return out
+
+
+def _cowork_prompt(content: str) -> dict[str, Any]:
+    """A message relayed from Claude Cowork (file channel): keep the thread and Cowork's own words, drop the long
+    instructions Hermes receives with every relayed message."""
+    head = _COWORK_HEAD.search(content or "")
+    body_m = _COWORK_BODY.search(content or "")
+    body = (content[body_m.end():] if body_m else "").strip()
+    first = next((ln.strip() for ln in body.splitlines() if ln.strip()), "")
+    return {"cowork": {"thread": head.group(1) if head else "", "file": body_m.group(1).strip() if body_m else "",
+                       "at": body_m.group(2).strip() if body_m else ""},
+            "auto_summary": redact(_clip(first, 200)) if first else "",
+            "cowork_body": redact(_clip(body, 8000))}
 
 
 def _kanban_prompt(content: str) -> dict[str, Any]:
