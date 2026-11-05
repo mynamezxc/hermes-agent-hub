@@ -1537,6 +1537,71 @@ class AccountRotationTest(unittest.TestCase):
         self.assertEqual((r["switched_to"], r["removed"], r["accounts"]), ("c", ["b"], 2))
         self.assertTrue((self.m._hub_dir("") / "account-rotation.jsonl").exists())
 
+    def test_lapsed_codex_plan_is_skipped_not_removed(self):
+        from types import SimpleNamespace
+        e = SimpleNamespace(id="a", last_status=None)
+        self.m._entry_windows = lambda prov, ent: [{"label": "Session", "used_percent": 0}]
+        self.m._plan_lapsed = lambda prov, ent: True
+        self.assertEqual(self.m._account_state("openai-codex", e)["state"], "expired")
+        p, _ = self.plan({"a": "expired", "b": "ok", "c": "ok", "d": "ok"})
+        self.assertEqual((p["use"], p["remove"]), ("b", []))  # switch away, keep the login for the owner to decide
+
+
+class AccountListTest(unittest.TestCase):
+    """Owner 05/11/2026: several Codex accounts, some plans lapsed -> list them in Settings and allow removing."""
+
+    @classmethod
+    def setUpClass(cls):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        home = FIX / "accounts" / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        os.environ["HERMES_HOME"] = str(home)
+        spec = importlib.util.spec_from_file_location("agents_hub_api_accounts", API)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+        app = FastAPI()
+        app.include_router(cls.m.router)
+        cls.c = TestClient(app)
+
+    def test_verdict_prefers_live_plan_and_flags_dead_and_full(self):
+        v = self.m.account_verdict
+        self.assertEqual(v({"provider": "openai-codex", "plan": "plus", "usage_plan": "Free", "windows": [{"used_percent": 0}]}), "plan_expired")
+        self.assertEqual(v({"provider": "openai-codex", "plan": "plus", "usage_plan": "Plus", "windows": [{"used_percent": 30}]}), "ok")
+        self.assertEqual(v({"provider": "openai-codex", "usage_plan": "Pro", "windows": [{"used_percent": 100}]}), "full")
+        self.assertEqual(v({"provider": "openai-codex", "last_status": "dead", "usage_plan": "Plus"}), "dead")
+        self.assertEqual(v({"provider": "anthropic", "windows": []}), "unknown")
+
+    def test_list_has_no_secrets_and_marks_duplicates(self):
+        rows = [{"id": "a", "email": "x@y.z", "access": None}, {"id": "b", "email": "X@y.z"}, {"id": "c", "email": "q@y.z"}]
+        self.m._list_accounts = lambda prov: {"provider": prov, "accounts": rows}
+        self.m._account_list_cache.clear()
+        r = self.c.get("/accounts/openai-codex/list")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.c.get("/accounts/nope/list").status_code, 404)
+
+    def test_token_facts_never_return_the_token(self):
+        import base64
+        claims = {"https://api.openai.com/profile": {"email": "a@b.c"}, "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"}, "exp": 5}
+        tok = "h." + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=") + ".s"
+        f = self.m._token_facts("openai-codex", tok)
+        self.assertEqual((f["email"], f["plan"], f["token_exp"]), ("a@b.c", "plus", 5))
+        self.assertNotIn(tok, json.dumps(f))
+
+    def test_remove_guards_unknown_last_and_runs_hermes(self):
+        calls = []
+        self.m._run_hermes = lambda args: calls.append(args) or 0
+        self.m._pool_ids = lambda prov: ["a", "b"]
+        self.assertEqual(self.c.post("/accounts/openai-codex/remove", json={"id": "zz"}).status_code, 404)
+        r = self.c.post("/accounts/openai-codex/remove", json={"id": "b"})
+        self.assertEqual((r.status_code, calls), (200, [["auth", "remove", "openai-codex", "b"]]))
+        self.m._pool_ids = lambda prov: ["a"]
+        self.assertEqual(self.c.post("/accounts/openai-codex/remove", json={"id": "a"}).status_code, 409)
+        self.assertEqual(self.c.post("/accounts/openai-codex/remove", json={"id": "a", "force": True}).status_code, 200)
+        self.m._run_hermes = lambda args: 1
+        self.m._pool_ids = lambda prov: ["a", "b"]
+        self.assertEqual(self.c.post("/accounts/openai-codex/remove", json={"id": "a"}).status_code, 502)
+
 
 class WorkflowHeartbeatTest(unittest.TestCase):
     """Workflow view (who does what, who waits on whom) and the token-free task heartbeat."""

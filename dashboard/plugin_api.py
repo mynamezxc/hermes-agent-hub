@@ -3418,6 +3418,18 @@ def _pool_entries(provider: str) -> list[Any]:
     return sorted(load_pool(provider).entries(), key=lambda e: (e.priority, e.id))
 
 
+def _plan_lapsed(provider: str, entry: Any) -> bool:
+    """The account's live usage reports a non-paid plan (falls back to the token claim when usage gives none)."""
+    from agent.account_usage import fetch_account_usage
+    try:
+        d = _snapshot_dict(fetch_account_usage(provider, base_url=entry.runtime_base_url, api_key=entry.runtime_api_key,
+                                               read_only=True, identity_id=entry.id)) or {}
+    except Exception:
+        d = {}
+    plan = str(d.get("plan") or _token_facts(provider, getattr(entry, "access_token", "") or "").get("plan") or "").lower()
+    return bool(plan) and plan not in PAID_PLANS
+
+
 def _entry_windows(provider: str, entry: Any) -> Optional[list[dict[str, Any]]]:
     """One account's usage windows, read with THAT account's token (read-only: never rotates). None = unknown."""
     from agent.account_usage import fetch_account_usage
@@ -3443,7 +3455,7 @@ def _refresh_entry(provider: str, entry_id: str) -> tuple[Optional[Any], bool]:
 
 
 def _account_state(provider: str, entry: Any) -> dict[str, Any]:
-    """ok (both limits left) | full (5h or weekly used up) | dead (login rejected) | unknown."""
+    """ok (both limits left) | full (5h or weekly used up) | expired (Codex plan lapsed to free) | dead (login rejected) | unknown."""
     if getattr(entry, "last_status", None) == "dead":
         return {"state": "dead"}
     try:
@@ -3461,6 +3473,8 @@ def _account_state(provider: str, entry: Any) -> dict[str, Any]:
                 wins = None
     if not wins:
         return {"state": "unknown"}
+    if provider == "openai-codex" and _plan_lapsed(provider, entry):  # paid plan lapsed to free: skip, never remove
+        return {"state": "expired", "windows": wins}
     full = [w for w in wins if isinstance(w.get("used_percent"), (int, float)) and w["used_percent"] >= FULL_PCT]
     resets = [w.get("reset_at") for w in full if isinstance(w.get("reset_at"), (int, float))]
     return {"state": "full" if full else "ok", "windows": wins, "reset_at": max(resets) if resets else None}
@@ -3587,6 +3601,116 @@ def accounts_rotate_now(provider: str) -> dict[str, Any]:
     if provider not in HUB_PROVIDERS:
         raise HTTPException(404, "unknown provider")
     return rotate_accounts(provider)
+
+
+# ───────────── account list + remove (owner 05/11/2026: several Codex accounts, some plans expired) ─────────────
+ACCOUNT_LIST_TTL_S = 120
+PAID_PLANS = {"plus", "pro", "team", "business", "enterprise", "edu"}
+_account_list_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_account_list_lock = threading.Lock()
+
+
+def _token_facts(provider: str, token: str) -> dict[str, Any]:
+    """Email + plan + expiry decoded from the account's own token (no signature check, display only).
+    Never returns the token or any id that could act as one."""
+    try:
+        from agent.credential_pool import _decode_jwt_claims
+        c = _decode_jwt_claims(token or "") or {}
+    except Exception:
+        c = {}
+    prof = c.get("https://api.openai.com/profile") or {}
+    auth = c.get("https://api.openai.com/auth") or {}
+    email = prof.get("email") or c.get("email") or c.get("preferred_username")
+    return {"email": email if isinstance(email, str) else None,
+            "plan": auth.get("chatgpt_plan_type") if provider == "openai-codex" else None,
+            "token_exp": c.get("exp") if isinstance(c.get("exp"), (int, float)) else None}
+
+
+def account_verdict(row: dict[str, Any]) -> str:
+    """dead (login rejected) | plan_expired (paid plan lapsed to free) | full | ok | unknown. Pure, for the UI badge."""
+    if row.get("last_status") == "dead":
+        return "dead"
+    plan = str(row.get("usage_plan") or row.get("plan") or "").lower()  # live usage plan beats the token claim
+    if row.get("provider") == "openai-codex" and plan and plan not in PAID_PLANS:
+        return "plan_expired"
+    wins = row.get("windows") or []
+    if any(isinstance(w.get("used_percent"), (int, float)) and w["used_percent"] >= FULL_PCT for w in wins):
+        return "full"
+    return "ok" if wins else "unknown"
+
+
+def _list_accounts(provider: str) -> dict[str, Any]:
+    from agent.credential_pool import load_pool
+    pool = load_pool(provider)
+    cur = pool.peek()
+    entries = sorted(pool.entries(), key=lambda e: (e.priority, e.id))
+    rows = []
+    for e in entries:
+        facts = _token_facts(provider, getattr(e, "access_token", "") or "")
+        usage = None
+        try:  # read-only with this account's own token: never refreshes or rotates the pool
+            from agent.account_usage import fetch_account_usage
+            usage = _snapshot_dict(fetch_account_usage(provider, base_url=e.runtime_base_url, api_key=e.runtime_api_key,
+                                                       read_only=True, identity_id=e.id))
+        except Exception:
+            usage = None
+        row = {"id": e.id, "provider": provider, "label": e.label, "priority": e.priority, "source": e.source,
+               "in_use": bool(cur is not None and cur.id == e.id), "last_status": e.last_status,
+               "last_error": redact(str(e.last_error_reason or e.last_error_message or ""))[:160] or None,
+               "last_refresh": e.last_refresh, **facts,
+               "usage_plan": (usage or {}).get("plan"), "windows": (usage or {}).get("windows") or [],
+               "unavailable": (usage or {}).get("unavailable")}
+        row["verdict"] = account_verdict(row)
+        rows.append(row)
+    seen: dict[str, int] = {}
+    for r in rows:  # the same login added twice shows as duplicates (no extra limit)
+        key = (r.get("email") or "").lower()
+        if key:
+            seen[key] = seen.get(key, 0) + 1
+    for r in rows:
+        r["duplicates"] = seen.get((r.get("email") or "").lower(), 1) - 1 if r.get("email") else 0
+    return {"provider": provider, "checked_at": time.time(), "accounts": rows}
+
+
+@router.get("/accounts/{provider}/list")
+def accounts_list(provider: str, refresh: bool = Query(False)) -> dict[str, Any]:
+    """Every account Hermes holds for the provider (shared pool), with email, plan, usage and a verdict. No secrets."""
+    if provider not in HUB_PROVIDERS:
+        raise HTTPException(404, "unknown provider")
+    with _account_list_lock:
+        hit = _account_list_cache.get(provider)
+        if hit and not refresh and time.time() - hit[0] < ACCOUNT_LIST_TTL_S:
+            return hit[1]
+    data = _list_accounts(provider)
+    with _account_list_lock:
+        _account_list_cache[provider] = (time.time(), data)
+    return data
+
+
+@router.post("/accounts/{provider}/remove")
+async def accounts_remove(provider: str, request: Request) -> dict[str, Any]:
+    """Remove one account from Hermes's credential pool (``hermes auth remove``). The last account is kept unless
+    ``force`` is set, so the agents are never left without a login by a stray click."""
+    if provider not in HUB_PROVIDERS:
+        raise HTTPException(404, "unknown provider")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    rid = str((body or {}).get("id") or "")
+    ids = _pool_ids(provider)
+    if not rid or rid not in ids:
+        raise HTTPException(404, "account not found")
+    if len(ids) == 1 and not (body or {}).get("force"):
+        raise HTTPException(409, "last_account")
+    code = _run_hermes(["auth", "remove", provider, rid])
+    if code != 0:
+        raise HTTPException(502, f"hermes auth remove failed ({code})")
+    with _account_list_lock:
+        _account_list_cache.pop(provider, None)
+    _usage_forget(provider)
+    _log_rotation(provider, {"use": None, "remove": [rid], "states": {}}, {"removed": [rid], "switched_to": None, "by": "owner"})
+    return {"provider": provider, "removed": rid, "accounts": len(_pool_ids(provider))}
 
 
 def _start_cli_login(agent: str, provider: str) -> dict[str, Any]:

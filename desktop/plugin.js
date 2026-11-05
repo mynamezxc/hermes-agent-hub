@@ -27,7 +27,7 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.21'
+const PLUGIN_VERSION = '1.6.22'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
@@ -7862,7 +7862,120 @@ function ProviderRow({ agent, p, usage, now }) {
       canLogin && !login ? h('button', { type: 'button', className: cx('ah-btn ah-btn-sm ah-state', ok ? 'ah-btn-text' : 'ah-btn-tonal'), onClick: () => setLogin(true) }, h(Icon, { name: 'key', size: 14 }), ok ? ' Log in again' : ' Log in') : null,
       !canLogin && p.cli_command ? h('code', { className: 'ah-row-sub ah-mono' }, p.cli_command) : null
     ),
-    login ? h(LoginPanel, { agent, provider: p.id, onDone: done }) : null
+    login ? h(LoginPanel, { agent, provider: p.id, onDone: done }) : null,
+    HUB_PROVIDER_IDS.includes(p.id) ? h(AccountPool, { provider: p.id, agent }) : null
+  )
+}
+
+/* Every account Hermes holds for Codex/Claude (one shared pool for all agents), with plan, usage and a
+   two-step Remove for accounts whose plan lapsed or whose login was rejected (owner 05/11/2026). */
+const ACCOUNT_VERDICT = {
+  ok: { tone: 'ok', label: 'Active' },
+  full: { tone: 'warn', label: 'Limit reached' },
+  plan_expired: { tone: 'err', label: 'Plan expired' },
+  dead: { tone: 'err', label: 'Login rejected' },
+  unknown: { tone: 'neutral', label: 'Status unknown' }
+}
+
+function accountUsageText(row) {
+  const wins = Array.isArray(row.windows) ? row.windows : []
+
+  return wins
+    .filter(w => typeof w.used_percent === 'number')
+    .map(w => `${windowShort(w.label) || w.label} ${Math.round(w.used_percent)}%`)
+    .join(' · ')
+}
+
+function AccountPool({ provider, agent }) {
+  const [st, setSt] = useState({ status: 'loading', data: null, error: '' })
+  const [ask, setAsk] = useState(null)
+  const [busy, setBusy] = useState(null)
+  const load = async refresh => {
+    setSt(prev => ({ ...prev, status: 'loading' }))
+
+    try {
+      const d = await C.rest(`/accounts/${enc(provider)}/list${refresh ? '?refresh=true' : ''}`)
+
+      setSt({ status: 'ready', data: d, error: '' })
+    } catch (err) {
+      setSt(prev => ({ status: 'error', data: prev.data, error: errText(err) }))
+    }
+  }
+
+  useEffect(() => {
+    void load(false)
+  }, [provider])
+
+  const remove = async (row, force) => {
+    setBusy(row.id)
+
+    try {
+      await C.rest(`/accounts/${enc(provider)}/remove`, { method: 'POST', body: { id: row.id, ...(force ? { force: true } : {}) } })
+      setAsk(null)
+      await load(true)
+      void fetchProviders(agent)
+      void fetchUsage(agent, 8)
+    } catch (err) {
+      setSt(prev => ({ ...prev, error: errText(err) }))
+    }
+
+    setBusy(null)
+  }
+
+  const rows = (st.data && st.data.accounts) || []
+
+  if (st.status !== 'loading' && rows.length === 0 && !st.error) {
+    return null
+  }
+
+  const last = rows.length === 1
+
+  return h(
+    'div',
+    { className: 'ah-pool' },
+    h(
+      'div',
+      { className: 'ah-pool-head' },
+      h('span', { className: 'ah-field-label' }, `Accounts in Hermes (${rows.length})`),
+      h('span', { className: 'ah-spacer' }),
+      h('button', { type: 'button', className: 'ah-icon-btn ah-icon-btn-sm ah-state', title: 'Check every account again', 'aria-label': 'Check every account again', onClick: () => void load(true) }, h(Icon, { name: 'sync', size: 14, spinning: st.status === 'loading' }))
+    ),
+    st.error ? h('p', { className: 'ah-row-sub ah-pool-err' }, h(Icon, { name: 'warning', size: 12 }), ' ', st.error) : null,
+    rows.map(r => {
+      const v = ACCOUNT_VERDICT[r.verdict] || ACCOUNT_VERDICT.unknown
+      const plan = r.usage_plan || r.plan
+      const confirming = ask === r.id
+
+      return h(
+        'div',
+        { key: r.id, className: cx('ah-pool-row', r.in_use && 'is-current') },
+        h('span', { className: cx('ah-acct-dot', v.tone === 'ok' ? 'is-ok' : 'is-off') }),
+        h(
+          'div',
+          { className: 'ah-pool-main' },
+          h('b', { className: 'ah-pool-name', title: r.label }, r.email || r.label || r.id),
+          h(
+            'span',
+            { className: 'ah-row-sub' },
+            [r.in_use ? 'In use' : `#${r.priority + 1} in order`, plan ? `Plan ${String(plan).charAt(0).toUpperCase()}${String(plan).slice(1)}` : null, accountUsageText(r) || null, r.duplicates ? 'Same login added more than once' : null]
+              .filter(Boolean)
+              .join(' · ')
+          ),
+          r.last_error && r.verdict !== 'ok' ? h('span', { className: 'ah-row-sub ah-pool-err' }, r.last_error) : null
+        ),
+        h('span', { className: cx('ah-chip', `is-${v.tone === 'neutral' ? 'flat' : v.tone}`) }, v.label),
+        confirming
+          ? h(
+              'span',
+              { className: 'ah-pool-confirm' },
+              h('span', { className: 'ah-row-sub' }, last ? 'Last account: agents lose this login.' : 'Remove from Hermes?'),
+              h('button', { type: 'button', className: 'ah-btn ah-btn-sm ah-btn-danger ah-state', disabled: busy === r.id, onClick: () => void remove(r, last) }, busy === r.id ? h(Icon, { name: 'loading', size: 12, spinning: true }) : null, ' Remove'),
+              h('button', { type: 'button', className: 'ah-btn ah-btn-sm ah-btn-text ah-state', disabled: busy === r.id, onClick: () => setAsk(null) }, 'Cancel')
+            )
+          : h('button', { type: 'button', className: 'ah-btn ah-btn-sm ah-btn-text ah-state', title: 'Remove this account from Hermes', onClick: () => setAsk(r.id) }, h(Icon, { name: 'trash', size: 14 }), ' Remove')
+      )
+    }),
+    h('p', { className: 'ah-field-hint' }, 'All agents share these accounts. Hermes uses them in order and Agents Hub switches to the next one when the account in use runs out. Removing only deletes the login stored in Hermes, not the OpenAI/Claude account.')
   )
 }
 
@@ -8657,6 +8770,14 @@ const CSS = `
 .ah-root .ah-acct-main{display:flex;flex-direction:column;min-width:0}
 .ah-root .ah-acct-dot{width:9px;height:9px;border-radius:50%;flex:none;background:var(--ah-outline)}
 .ah-root .ah-acct-dot.is-ok{background:var(--ah-ok)}
+.ah-root .ah-pool{display:flex;flex-direction:column;gap:6px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--ah-outline-variant)}
+.ah-root .ah-pool-head{display:flex;align-items:center;gap:8px}
+.ah-root .ah-pool-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:6px 8px;border-radius:var(--ah-r-sm)}
+.ah-root .ah-pool-row.is-current{background:color-mix(in srgb,var(--ah-primary) 8%,transparent)}
+.ah-root .ah-pool-main{display:flex;flex-direction:column;min-width:0;flex:1}
+.ah-root .ah-pool-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.ah-root .ah-pool-err{color:var(--ah-error,#b3261e)}
+.ah-root .ah-pool-confirm{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .ah-root .ah-acct-more summary{cursor:pointer;font-size:12px;color:var(--ah-on-surface-variant);padding:4px 0}
 .ah-root .ah-acct-more .ah-acct{margin-top:8px}
 .ah-root .ah-login{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--ah-outline-variant)}
