@@ -78,15 +78,14 @@ then `kanban_unblock`.
 - **Give several cards at once and wait on a condition.** Create the cards for your reports, then create ONE card for
   yourself with `parents` = those cards (e.g. "Merge API + UI and report to manager"). It stays in todo and starts
   by itself when every parent is done. That is how a superior "waits for A and B, then continues"; never poll.
-- If you did not plan a follow-up, the Hub task heartbeat gives you a card "Nghiệm thu N thẻ cấp dưới…" when your
-  reports finish. Review the real output, comment "nghiệm thu" or create a fix card, plan the next step, then complete
-  it with a report your own superior can read. **Start the summary with `ĐẠT` or `KHÔNG ĐẠT`**: the Hub reads that
-  first sentence and shows "Accepted / Not accepted by <you>" on every card you reviewed.
-- A report blocked on a question for you gets a card "Trả lời @…". Answer on the blocked card, `kanban_unblock` it,
-  then complete the answer card. What only the owner can decide (money, publishing, secrets, new access): say so on
-  the card and leave it waiting on the owner. The Hub lists it under "Waiting on you".
-- Track each hand-off as one of your goals. Mark it `done` only after you checked the real output (files, tests,
-  logs). Do not trust self-reports.
+- If the owner enabled task heartbeat and you did not plan a follow-up, the Hub can give you a `Review: …` card.
+  Otherwise, arrange the review on the board. Verify the actual output, comment `REVIEW: PASS` or assign a specific
+  fix, and finish the review summary starting with `PASS` or `FAIL`. The Hub displays the verdict on reviewed cards.
+- When heartbeat is enabled, a blocked report may produce an `Answer @…` card. Reply on the blocked card and use
+  `kanban_unblock` only when the blocker is resolved. Finish the answer card with `ANSWERED: …` or
+  `WAITING ON OWNER: …`; owner-only decisions stay blocked on the original card.
+- Track hand-offs as Kanban cards, not as separate goals. Keep one goal per meaningful outcome and identify its
+  required work. Mark it done only after checking the evidence against its acceptance criteria; otherwise give a next action.
 - Not good enough: comment specific fixes or create a follow-up card. Still failing after two rounds: tell the owner.
 
 ## 7. Token economy (why the rules above)

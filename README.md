@@ -11,7 +11,7 @@ running commands · scheduled jobs · team roster · Claude & Codex usage at a g
 
 <p>
   <a href="https://github.com/mynamezxc/hermes-agent-hub/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/mynamezxc/hermes-agent-hub?style=flat-square&logo=github&color=5B6CE0"></a>
-  <a href="https://github.com/mynamezxc/hermes-agent-hub/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.6.22-5B6CE0?style=flat-square"></a>
+  <a href="https://github.com/mynamezxc/hermes-agent-hub/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.6.23-5B6CE0?style=flat-square"></a>
   <a href="https://github.com/NousResearch/hermes-agent"><img alt="Hermes Agent plugin" src="https://img.shields.io/badge/Hermes%20Agent-plugin-0E9F8E?style=flat-square"></a>
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-3B8FD9?style=flat-square">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-D9822B?style=flat-square"></a>
@@ -210,6 +210,48 @@ The **Scheduled** tab lists every agent's cron jobs and runs. **New scheduled jo
   (`TEAM.md`) to decide who gets which piece of work. **New agent** creates a Hermes profile with a role `SOUL.md`
   and a random face; **New avatar** rolls another face.
 
+### 8. Background automation (opt-in)
+
+Both **Kanban task heartbeat** and **Automatically switch Codex and Claude accounts** are off by default. Enable
+them independently in **Hub → Settings → Background automation**. Only an explicit `true` in
+`<HERMES_HOME>/agents-hub/settings.json` enables a job (`task_heartbeat` or `auto_switch_accounts`). Once enabled,
+the jobs run while the backend is up, even with the Hub page closed. Viewing Workflow or account status does not start them.
+
+| Job | When it checks | Commands it may run |
+|---|---|---|
+| Kanban task heartbeat | First check after a 30-second startup delay, then every 60 seconds | `hermes kanban promote <task-id> <reason>` for eligible tasks, and `hermes kanban create <title> --assignee … --body … --created-by agents-hub --idempotency-key … --priority …` for English `Answer` and `Review` cards. The check does not call a model; the usual Kanban dispatcher may run the resulting cards. |
+| Account auto-switch | First check after a 45-second startup delay, then every 5 minutes when a provider has multiple accounts. Usage at its limit can trigger an earlier check once 60 seconds have elapsed since the last recorded check. | No background `hermes auth` command. The Hub reads usage without refreshing and updates only priority through Hermes's credential store API when it finds a usable replacement. It never runs `hermes auth remove` automatically. |
+
+Turning a job off prevents new writes after the setting is saved. An action already in flight may finish before the change is saved.
+
+Rejected and lapsed logins stay visible in **Model accounts**. Only an explicit, confirmed **Remove** there runs
+`hermes auth remove <provider> <credential-id>`. Signing in through the Hub is a separate owner-initiated action:
+Claude login invokes `hermes [-p <profile>] auth add anthropic`; a newly approved root login may be made first
+priority through Hermes's credential store API. These login actions are independent of periodic auto-switching.
+
+See [Agents Hub improvement proposal](docs/agents-hub-improvement-proposal.md) for project-scoped goals,
+task review, and native coding runners.
+
+### 9. Project delivery
+
+In **Workflow → Project delivery**, choose a project from the default Hermes profile. Bind a Kanban board to the
+project in Hermes first. The panel shows only cards explicitly linked to that project, even on a shared board.
+The existing team workflow and heartbeat are unchanged. The project panel shows task status, milestones, and up to
+100 recent Kanban worker attempts for that project.
+
+1. Create one goal for the outcome, with an owner, reviewer and acceptance criteria. Pick a current goal if several
+   are open. Use **Draft a Kanban task** for hand-offs, then enter the required task IDs on the goal.
+2. Drafts are created **blocked** with an explicit project and board. Verify the assignee, approved workspace,
+   sandbox and provider before manually unblocking on that Hermes Kanban board. Codex and Claude selections load
+   their respective skills in the assigned Hermes worker, which delegates to the installed CLI if available.
+   Gemini sets the model/provider on the Hermes worker; enter only the model ID, never a key. The Hub does not launch
+   these CLIs directly or track a separate native CLI session.
+3. After a reviewer checks task outputs, record task evidence with **Verify task**. After all required cards are
+   verified, **Accept goal** requires separate evidence for the outcome. A reopened/recompleted required card
+   invalidates its previous verification. **Archive goal** asks for a reason and confirmation, and keeps history.
+4. **Preview legacy goals** lists open per-agent goals without migrating or modifying them. Their original history
+   and controls remain in the agent's Goals panel. Rebinding a project pauses edits to its old goal history.
+
 ## 🧠 How agents learn the Hub
 
 You do not need to brief your agents. The plugin teaches them:
@@ -218,19 +260,19 @@ You do not need to brief your agents. The plugin teaches them:
 |---|---|
 | Hidden `<hub-goals>` block | Sent with every Hub message: open goals, the update format, pointers to the skills and the team roster. The Hub strips it from the chat. |
 | `agents-hub:hub-operating` | Goals (when to add, complete, drop; evidence before "done"), editing with `write_file` / `patch` so diffs and rollback work, permissions, steering, reply style. |
-| `agents-hub:team-coordination` | Read `TEAM.md`, split the work, pick members by role and strengths, hand off through Hermes's Kanban board (`kanban_create`, so the worker runs under its own profile and approvals), track hand-offs as goals, verify, report. |
+| `agents-hub:team-coordination` | Read `TEAM.md`, pick members by role and strengths, hand off through Hermes's Kanban board (`kanban_create`), and verify the output. Track hand-offs as tasks, not as separate goals. |
 | `agents-hub:hub-setup` | Install, first-run setup, creating agents, accounts and usage. |
 | First-run setup | Builds `<HERMES_HOME>/agents-hub/team.json` from each profile's `profile.yaml` and writes `TEAM.md`. Existing `SOUL.md` / `config.yaml` are never touched. |
 
 ## 🔒 Data & security
 
-- **Read-only by default.** Profile databases are opened read-only. The Hub writes only its own state in
-  `<HERMES_HOME>/agents-hub/` (team, goals, approvals, setup marker), cron jobs you create (through Hermes's
-  scheduler), agents you create, and, when you ask for it, files restored to an earlier message (backed up first).
-- **Tokens stay in Hermes.** Logins run Hermes's own flows; the Hub returns status fields and usage percentages only.
+- **Read-only inspection.** Profile databases are opened read-only. Writes to Kanban or account priority via
+  automation require the corresponding opt-in above. The Hub can also save its own state and perform explicit owner actions.
+- **Tokens stay in Hermes.** Logins run Hermes's own flows; the Hub never returns tokens.
   The pasted Claude code goes straight to the waiting `hermes auth add` process and is never stored or logged.
-- **Secrets are never shown.** Returned text is redacted; `private/`, `*.dpapi`, `.env*`, `*token*`, `*secret*`,
-  `*.pem`, `*.key`, `auth.json` and `credentials*` are never read or diffed.
+- **Secret files are excluded.** Returned text is redacted; file previews and diffs exclude `private/`, `*.dpapi`,
+  `.env*`, `*token*`, `*secret*`, `*.pem`, `*.key`, `auth.json` and `credentials*`. The Hub gets account IDs via
+  Hermes's credential pool API instead of opening `auth.json` itself.
 - Extra git repositories for the **Changes** tab: `<HERMES_HOME>/agents-hub.json` with `{"repos": ["/path"]}`, or
   `AGENTS_HUB_EXTRA_REPOS` (path-separator separated).
 
@@ -238,14 +280,12 @@ You do not need to brief your agents. The plugin teaches them:
 
 - **Reads** every profile's `state.db`, `config.yaml`, `profile.yaml`, cron jobs and `processes.json`, plus the shared
   `kanban.db` (read-only), to build the agent list, timelines, goals and running commands.
-- **Runs** `git status` / `git diff` (list arguments, no shell, with timeouts) in the repositories it shows, and,
-  only when you press **Log in** for Claude, Hermes's own `hermes [-p <profile>] auth add anthropic`; that process is
-  killed after 15 minutes if you never finish.
-- **Network**: none of its own. Usage numbers come from Hermes's read-only usage readers, which call Anthropic's and
-  OpenAI's usage endpoints with the login Hermes already holds, at most every 10 minutes while the Hub is open.
-  No telemetry.
-- **Writes**: its own state in `<HERMES_HOME>/agents-hub/`, cron jobs and profiles only when you create them, and files
-  only when you ask to restore them to an earlier message (the current content is backed up first).
+- **Runs** `git status` / `git diff` in the repositories it shows (list arguments, no shell, with timeouts).
+  Auth and Kanban commands and their triggers are listed under [Background automation](#8-background-automation-opt-in).
+- **Network**: Hermes makes provider requests for login, usage and opted-in account rotation. Chat usage is cached
+  for 10 minutes; the account list uses a separate two-minute cache and supports manual refresh. No telemetry.
+- **Writes**: its own state in `<HERMES_HOME>/agents-hub/`, cron jobs and profiles when you create them, Git workspace
+  files when you ask to restore them (backed up first), and Kanban/account priority changes when opted in as above.
 - **Approvals**: every permission answer is a click by you; the plugin never approves on its own and never starts
   agents in non-interactive (YOLO) mode.
 - **Hermes internals**: besides the plugin API it calls a few Hermes modules that are not yet documented plugin

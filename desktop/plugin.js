@@ -27,7 +27,7 @@ const PLUGIN_ID = 'agents-hub'
 const HUB_PATH = '/hub'
 const POLL_MS = 15000
 const STYLE_ID = 'agents-hub-style'
-const PLUGIN_VERSION = '1.6.22'
+const PLUGIN_VERSION = '1.6.23'
 
 // What a failed request most likely means, in words the owner can act on.
 function backendProblem(err) {
@@ -583,59 +583,6 @@ function load() {
     })
 
   return inflight
-}
-
-// OS notification click -> the Hub, not the core chat view. Core's own listener opens the session in the
-// Sessions view first; when that session is one of the Hub's agent chats we bring the owner back to the Hub
-// with that agent's chat open (a few hops so it lands after core's navigation settles).
-function agentForSession(id) {
-  if (!S || !id) {
-    return null
-  }
-
-  for (const [agent, lv] of Object.entries(S.live || {})) {
-    if (lv && (lv.runtime === id || lv.stored === id)) {
-      return agent
-    }
-  }
-
-  for (const [agent, c] of Object.entries(S.chat || {})) {
-    if (c && c.data && c.data.session_id === id) {
-      return agent
-    }
-  }
-
-  return null
-}
-
-const onHubPath = () => {
-  try {
-    return String(window.location.hash || window.location.pathname || '').replace(/^#/, '').split('?')[0] === HUB_PATH
-  } catch {
-    return false
-  }
-}
-
-function focusHubChat(sessionId, navigate) {
-  const agent = agentForSession(sessionId)
-
-  if (!agent) {
-    return false
-  }
-
-  const go = () => {
-    if (!onHubPath()) {
-      navigate(HUB_PATH)
-    }
-
-    setUi({ agent, tab: 'chat', side: true, sideFile: null, handoff: null })
-  }
-
-  for (const ms of [0, 150, 450]) {
-    setTimeout(go, ms)
-  }
-
-  return true
 }
 
 function setUi(patch) {
@@ -3495,8 +3442,125 @@ function HeartbeatLog({ s, wf }) {
   return h(
     'div',
     { className: 'ah-wf-hb' },
-    h('p', { className: 'ah-row-sub' }, hb.enabled === false ? 'Task heartbeat is off (settings.json: task_heartbeat).' : `Task heartbeat checks the board every ${hb.every_s || 60}s without calling any model${hb.last_run ? ` · last check ${relTime(hb.last_run, s.now)}` : ''}. It starts cards whose earlier tasks are done, asks the delegating agent to answer a blocked card, and asks a superior to review finished work and plan the next step.`),
+    h('p', { className: 'ah-row-sub' }, hb.enabled === false ? 'Task heartbeat is off. Enable it in Hub Settings → Background automation.' : `Task heartbeat checks the board every ${hb.every_s || 60}s without calling any model${hb.last_run ? ` · last check ${relTime(hb.last_run, s.now)}` : ''}. It starts cards whose earlier tasks are done, asks the delegating agent to answer a blocked card, and asks a superior to review finished work and plan the next step.`),
     (hb.log || []).length ? h('ul', { className: 'ah-wf-hblog' }, hb.log.map((a, i) => h('li', { key: i }, h('time', { className: 'ah-side-time' }, relTime(a.at, s.now)), ` ${label(a)}`))) : null
+  )
+}
+
+function DeliveryForm({ fields, label, save, busy }) {
+  return h('form', { onSubmit: e => {
+    e.preventDefault()
+    const form = e.currentTarget
+    const values = Object.fromEntries(new FormData(form))
+    void save(values).then(ok => { if (ok) form.reset() })
+  } }, fields.map(({ id, name, options, ...props }) => h('label', { key: id, className: 'ah-row-sub', style: { display: 'block', marginBottom: 6 } }, name, ' ',
+    options ? h('select', { name: id, className: 'ah-input', ...props }, options.map(([v, text]) => h('option', { key: v, value: v }, text))) : h('input', { name: id, className: 'ah-input', ...props })
+  )), h('button', { className: 'ah-btn ah-btn-tonal ah-btn-sm ah-state', type: 'submit', disabled: busy }, label))
+}
+
+function ProjectDelivery({ project, agents }) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState('')
+  const path = `/delivery/${enc(project)}`
+  useEffect(() => {
+    let active = true
+    let pending = false
+    const read = async () => {
+      if (pending) return
+      pending = true
+      try {
+        const result = await C.rest(path)
+        if (active) setData(prev => !prev || (result.at || 0) >= (prev.at || 0) ? result : prev)
+      } catch (err) {
+        if (active) setError(errText(err))
+      } finally { pending = false }
+    }
+    void read()
+    const stop = C.setInterval(read, 12000)
+    return () => { active = false; stop() }
+  }, [path])
+  const save = async (suffix, body) => {
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      await C.rest(`${path}/${suffix}`, { method: 'POST', body })
+      setNotice(suffix === 'tasks' ? 'Draft saved as blocked; review and unblock it on the selected Hermes Kanban board.' : 'Saved.')
+      setData(await C.rest(path))
+      return true
+    } catch (err) {
+      setError(errText(err))
+      return false
+    } finally { setBusy(false) }
+  }
+  const agentList = agents.map(a => [a, a])
+  const fields = (id, name, maxLength = 1500, required = true) => ({ id, name, maxLength, required })
+  const goalForm = (g, label, action, specs, prepare = x => x) => h(DeliveryForm, { fields: specs, label, busy,
+    save: values => save('goals', { id: g.id, action, ...prepare(values) }) })
+  const taskMap = new Map((data?.tasks || []).map(t => [t.id, t]))
+  const open = g => ['active', 'needs_review'].includes(g.status)
+  const goals = data?.goals || []
+  const goalCard = g => h('details', { key: g.id, open: data.current === g.id },
+    h('summary', null, `${data.current === g.id ? 'Current · ' : ''}${g.title} · ${g.status.replace('_', ' ')} · ${g.accepted}/${g.required} verified`),
+    h('p', { className: 'ah-row-sub' }, `Owner: ${g.owner} · Reviewer: ${g.reviewer} · ${g.criteria}`),
+    g.task_ids.length ? h('ul', null, g.task_ids.map(id => h('li', { key: id }, `${taskMap.get(id)?.title || id} · ${taskMap.get(id)?.status || 'unavailable'}`))) : null,
+    g.evidence ? h('p', null, `Goal evidence: ${g.evidence}`) : null,
+    g.archive_reason ? h('p', null, `Archive reason: ${g.archive_reason}`) : null,
+    !data.binding_changed && open(g) ? h('div', null,
+      data.current !== g.id ? h('button', { type: 'button', className: 'ah-btn ah-btn-text', disabled: busy, onClick: () => void save('goals', { id: g.id, action: 'focus' }) }, 'Set current') : null,
+      goalForm(g, 'Save required tasks', 'link', [{ ...fields('task_ids', 'Required task IDs (comma-separated)', 4000, false), defaultValue: g.task_ids.join(', ') }],
+        values => ({ task_ids: values.task_ids.split(',').map(x => x.trim()).filter(Boolean) })),
+      g.task_ids.some(id => taskMap.get(id)?.status === 'done') ? goalForm(g, 'Verify task', 'verify_task', [
+        { id: 'task_id', name: 'Completed task', options: g.task_ids.filter(id => taskMap.get(id)?.status === 'done').map(id => [id, taskMap.get(id).title]) }, fields('evidence', 'Task verification evidence')]) : null,
+      g.required > 0 && g.required === g.accepted ? goalForm(g, 'Accept goal', 'accept', [fields('evidence', 'Evidence for the goal itself')]) : null
+    ) : null,
+    !data.binding_changed && g.status !== 'archived' ? goalForm(g, 'Archive goal', 'archive', [fields('reason', 'Archive reason', 500)],
+      values => ({ ...values, confirm: globalThis.confirm(`Archive “${g.title}”? History is retained.`) })) : null,
+    h('details', null, h('summary', null, 'History'), h('ul', null, g.history.map((x, i) => h('li', { key: i },
+      `${x.action} · ${new Date(x.at * 1000).toLocaleString()}${x.evidence || x.reason ? ` · ${x.evidence || x.reason}` : ''}`))))
+  )
+  return h('div', null,
+    error ? h('p', { role: 'alert', className: 'ah-live-error' }, error) : null,
+    notice ? h('p', { role: 'status' }, notice) : null,
+    !data ? (!error ? h(Skeleton, { rows: 3 }) : null) : h('div', null,
+      h('p', { className: 'ah-row-sub' }, `Board: ${data.board} · ${data.tasks.filter(t => t.status === 'running').length} running · ${data.tasks.filter(t => t.status === 'review').length} in review · ${data.tasks.filter(t => t.status === 'blocked').length} blocked`),
+      data.binding_changed ? h('p', { role: 'alert' }, 'The board binding changed. Goal edits are paused to preserve history.') : null,
+      goals.filter(g => g.status !== 'archived').map(goalCard),
+      goals.some(g => g.status === 'archived') ? h('details', null, h('summary', null, 'Archived goals'), goals.filter(g => g.status === 'archived').map(goalCard)) : null,
+      !data.binding_changed && goals.filter(open).length < 3 ? h('details', null, h('summary', null, 'New goal'), h(DeliveryForm, { busy, label: 'Create goal',
+        fields: [fields('title', 'Outcome', 120), fields('criteria', 'Acceptance criteria'), { id: 'owner', name: 'Owner', options: agentList }, { id: 'reviewer', name: 'Reviewer', options: agentList }],
+        save: values => save('goals', { ...values, action: 'create' }) })) : null,
+      h('details', null, h('summary', null, 'Draft a Kanban task'), h(DeliveryForm, { busy, label: 'Save blocked draft',
+        fields: [fields('title', 'Task outcome', 120), fields('criteria', 'Acceptance criteria', 2000), { id: 'assignee', name: 'Assignee', options: agentList },
+          { id: 'runner', name: 'Runtime', options: [['hermes', 'Hermes profile'], ['codex', 'Codex CLI'], ['claude', 'Claude Code'], ['gemini', 'Gemini in Hermes']] }, fields('model', 'Gemini model ID (Gemini only)', 100, false)],
+        save: values => save('tasks', values) })),
+      h('details', { open: true }, h('summary', null, `Project tasks (${data.tasks.length})`), h('ul', null,
+        data.tasks.map(t => h('li', { key: t.id }, h('code', null, t.id), ` ${t.title} · ${t.assignee || 'Unassigned'} · ${t.status}${t.progress ? ` · ${t.progress}` : ''}`,
+          data.runs?.[t.id]?.length ? h('details', null, h('summary', null, 'Recent runs'), h('ul', null,
+            data.runs[t.id].map((r, i) => h('li', { key: i }, `${r.profile || 'Worker'} · ${r.status} · ${new Date(r.started_at * 1000).toLocaleString()}`)))) : null))))
+    )
+  )
+}
+
+function DeliveryPanel() {
+  const [catalog, setCatalog] = useState(null)
+  const [project, setProject] = useState('')
+  const [legacy, setLegacy] = useState(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let active = true
+    C.rest('/delivery/projects').then(d => { if (active) setCatalog(d) }).catch(err => { if (active) setError(errText(err)) })
+    return () => { active = false }
+  }, [])
+  return h(SectionCard, { title: 'Project delivery', icon: 'project' },
+    error ? h('p', { role: 'alert' }, error) : null,
+    catalog ? h('label', null, 'Project ', h('select', { className: 'ah-input', value: project, onChange: e => setProject(e.target.value) },
+      h('option', { value: '' }, catalog.projects.length ? 'Select a project' : 'No Hermes projects'), catalog.projects.map(p => h('option', { key: p.id, value: p.id }, `${p.name}${p.board ? ` · ${p.board}` : ' · no board'}`)))) : null,
+    project && catalog ? h(ProjectDelivery, { key: project, project, agents: catalog.agents }) : null,
+    h('button', { type: 'button', className: 'ah-btn ah-btn-text', onClick: () => void C.rest('/delivery/legacy/preview').then(setLegacy).catch(err => setError(errText(err))) }, 'Preview legacy goals (read-only)'),
+    legacy ? h('ul', null, legacy.goals.length ? legacy.goals.map(g => h('li', { key: `${g.agent}:${g.id}` }, `${g.agent} · ${g.title} · idle ${g.idle_days}d`)) : h('li', null, 'No open legacy goals.')) : null
   )
 }
 
@@ -3514,6 +3578,7 @@ function Workflow({ s }) {
   return h(
     'div',
     { className: 'ah-pad ah-wf' },
+    h(DeliveryPanel),
     h(
       'div',
       { className: 'ah-wf-top' },
@@ -7629,8 +7694,8 @@ function UsagePop({ p, now }) {
           'small',
           { className: cx('ah-usage-sub', p.rotation.all_used_up && 'ah-usage-err') },
           p.rotation.all_used_up
-            ? `All ${p.rotation.accounts} accounts are out of their 5h/weekly limit: staying on this one until a limit resets.`
-            : `Auto-switch: ${p.rotation.accounts} accounts, moves to the next one when the 5h or weekly limit runs out${p.rotation.switched_to ? ' (just switched)' : ''}${p.rotation.removed ? `, removed ${p.rotation.removed} expired login` : ''}. Checked ${relTime(p.rotation.checked_at, now)}.`
+            ? `No eligible replacement among ${p.rotation.accounts} accounts. Check Model accounts in Hub Settings.`
+            : `Auto-switch: ${p.rotation.accounts} accounts${p.rotation.switched_to ? ' (just switched)' : ''}${p.rotation.needs_attention ? ` · ${p.rotation.needs_attention} need attention in Hub Settings` : ''}. Checked ${relTime(p.rotation.checked_at, now)}.`
         )
       : null,
     p.error ? h('small', { className: 'ah-usage-err' }, p.error) : null
@@ -7672,23 +7737,7 @@ async function openUrl(url) {
     return false
   }
 
-  const bridges = [C && C.os, typeof window !== 'undefined' ? window.hermesDesktop : null]
-
-  for (const b of bridges) {
-    if (b && typeof b.openExternal === 'function') {
-      try {
-        const ok = await b.openExternal(url)
-
-        if (ok !== false) {
-          return true
-        }
-      } catch {
-        /* try the next bridge */
-      }
-    }
-  }
-
-  return false
+  return (await C?.os?.openExternal?.(url)) === true
 }
 
 async function copyText(text) {
@@ -7975,7 +8024,7 @@ function AccountPool({ provider, agent }) {
           : h('button', { type: 'button', className: 'ah-btn ah-btn-sm ah-btn-text ah-state', title: 'Remove this account from Hermes', onClick: () => setAsk(r.id) }, h(Icon, { name: 'trash', size: 14 }), ' Remove')
       )
     }),
-    h('p', { className: 'ah-field-hint' }, 'All agents share these accounts. Hermes uses them in order and Agents Hub switches to the next one when the account in use runs out. Removing only deletes the login stored in Hermes, not the OpenAI/Claude account.')
+    h('p', { className: 'ah-field-hint' }, 'These are the root Hermes accounts. Hub switching is off unless you opt in under Background automation. Removing a login from Hermes does not delete the OpenAI or Claude account.')
   )
 }
 
@@ -8167,6 +8216,46 @@ function NewAgentForm({ rows, onClose }) {
   )
 }
 
+function AutomationSettings() {
+  const [settings, setSettings] = useState(null)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let active = true
+    C.rest('/settings/automation').then(data => {
+      if (active) setSettings(data)
+    }).catch(err => {
+      if (active) setError(errText(err))
+    })
+    return () => { active = false }
+  }, [])
+
+  const save = async (key, checked) => {
+    setPending(true)
+    setError('')
+    try {
+      setSettings(await C.rest('/settings/automation', { method: 'POST', body: { [key]: checked } }))
+    } catch (err) {
+      setError(errText(err))
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return h(SectionCard, { title: 'Background automation', icon: 'pulse' },
+    h('p', { className: 'ah-row-sub' }, 'Off by default. These settings apply to the whole Hub, even when this page is closed.'),
+    settings ? [
+      ['task_heartbeat', 'Kanban task heartbeat', 'Checks every minute and can promote tasks or create follow-up cards.'],
+      ['auto_switch_accounts', 'Automatically switch Codex and Claude accounts', 'Checks every five minutes and can change account priority. Never removes accounts.']
+    ].map(([key, label, detail]) => h('div', { key },
+      h('label', null, h('input', { type: 'checkbox', checked: settings[key] === true, disabled: pending, onChange: e => void save(key, e.target.checked) }), ' ', label),
+      h('p', { className: 'ah-row-sub' }, detail)
+    )) : !error ? h('p', { className: 'ah-row-sub' }, 'Loading automation settings…') : null,
+    error ? h('p', { className: 'ah-live-error', role: 'alert' }, error) : null
+  )
+}
+
 function ConfigTab({ s }) {
   const agents = list('agents', 'agents')
   const [agent, setAgent] = useState(s.ui.agent || 'default')
@@ -8181,6 +8270,7 @@ function ConfigTab({ s }) {
       h('span', { className: 'ah-spacer' }),
       h(UsageBar, { s, agent })
     ),
+    h(AutomationSettings),
     h(Accounts, { key: agent, s, agent }),
     h(TeamEditor, { s })
   )
@@ -9232,18 +9322,6 @@ export default {
       }
     } catch {
       /* older desktop: the replay poll alone drives the live view */
-    }
-
-    // Notification clicks for the Hub's agent chats come back to the Hub.
-    try {
-      const desk = typeof window !== 'undefined' ? window.hermesDesktop : null
-      const offFocus = desk && typeof desk.onFocusSession === 'function' ? desk.onFocusSession(id => focusHubChat(id, host.navigate)) : null
-
-      if (typeof offFocus === 'function') {
-        ctx.onDispose(offFocus)
-      }
-    } catch {
-      /* no desktop bridge (web dashboard): nothing to route */
     }
 
     const open = () => host.navigate(HUB_PATH)

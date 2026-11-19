@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Optional
@@ -90,14 +91,8 @@ def _safe_rel(path: str) -> str:
 # ───────────────────────────── generic helpers ───────────────────────────────
 
 def hermes_home() -> Path:
-    env = os.environ.get("HERMES_HOME")
-    if env:
-        return Path(env)
-    try:
-        from hermes_constants import get_hermes_home  # type: ignore
-        return Path(get_hermes_home())
-    except Exception:
-        return Path.home() / "AppData" / "Local" / "hermes"
+    from hermes_constants import get_hermes_home
+    return Path(get_hermes_home())
 
 
 def _num(v: Any) -> Optional[float]:
@@ -1055,14 +1050,14 @@ def _workflow_rows(now: float) -> dict[str, Any]:
 
 
 def verdict_of(summary: Any) -> Optional[str]:
-    """pass / fail / answered / owner from a completion summary (review cards start with ĐẠT / KHÔNG ĐẠT)."""
+    """Read English verdicts and keep recognizing existing Vietnamese cards."""
     s = " ".join(str(summary or "").replace("*", " ").split()).upper()
     s = re.sub(r"^(KẾT QUẢ|KẾT LUẬN|RESULT)\s*:\s*", "", s)
     if not s:
         return None
-    if s.startswith("CHỜ SẾP"):
+    if s.startswith(("WAITING ON OWNER", "CHỜ SẾP")):
         return "owner"
-    if s.startswith("ĐÃ TRẢ LỜI"):
+    if s.startswith(("ANSWERED", "ĐÃ TRẢ LỜI")):
         return "answered"
     # the conclusion is the first sentence; later sentences may quote other cards ("QA3 FAIL, fixed by …")
     head = re.split(r"(?<=[.!?;])\s", s, maxsplit=1)[0][:160]
@@ -1131,7 +1126,7 @@ def _task_view(tid: str, w: dict[str, Any], agents: set[str], now: float) -> dic
         if summ:
             item["summary"] = redact(_clip(" ".join(str(summ).replace("**", "").split()), 300))
             item["verdict"] = verdict_of(summ)
-    item["review"] = t.get("created_by") == "agents-hub" and str(t.get("title") or "").startswith(REVIEW_TITLE)
+    item["review"] = _is_heartbeat_review(t)
     if t.get("status") == "blocked":
         item.update(_block_info(t, w["blocks"].get(tid), sup))
     if t.get("status") in ("todo", "triage"):
@@ -1246,8 +1241,214 @@ def workflow_snapshot(now: Optional[float] = None) -> dict[str, Any]:
 
 @router.get("/workflow")
 def workflow() -> dict[str, Any]:
-    _ensure_hb_thread()
     return workflow_snapshot()
+
+
+@router.get("/delivery/projects")
+def delivery_projects() -> dict[str, Any]:
+    rows = query(root_home() / "projects.db",
+                 "SELECT id, slug, name, board_slug, primary_path FROM projects WHERE archived = 0 ORDER BY name, id")
+    return {"projects": [{"id": r["id"], "name": redact(r["name"]), "board": r["board_slug"],
+                           "has_repo": bool(r["primary_path"])} for r in rows], "agents": list_agents()}
+
+
+def _delivery_scope(project: str) -> tuple[dict[str, Any], Path]:
+    rows = query(root_home() / "projects.db",
+                 "SELECT id, slug, name, board_slug, primary_path FROM projects WHERE id = ? AND archived = 0", (project,))
+    if not rows:
+        raise HTTPException(404, "Unknown project")
+    p = rows[0]
+    board = p["board_slug"]
+    if not board or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", board) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", project):
+        raise HTTPException(409, "Bind a Kanban board to this project in Hermes first")
+    root = root_home()
+    db = root / "kanban.db" if board == "default" else root / "kanban" / "boards" / board / "kanban.db"
+    if not db.is_file() or not db.resolve().is_relative_to(root.resolve()):
+        raise HTTPException(409, "The project's Kanban board is unavailable")
+    return p, db
+
+
+def _delivery_tasks(db: Path, project: str) -> dict[str, dict[str, Any]]:
+    rows = query(db, "SELECT t.id, t.title, t.status, t.assignee, t.completed_at, t.started_at, t.block_kind, "
+                     "(SELECT payload FROM task_events e WHERE e.task_id=t.id AND e.kind IN ('heartbeat','blocked') "
+                     "ORDER BY e.id DESC LIMIT 1) AS event FROM tasks t WHERE t.project_id = ? "
+                     "ORDER BY t.created_at DESC, t.id", (project,))
+    tasks = {}
+    for r in rows:
+        event = r.pop("event")
+        try:
+            payload = json.loads(event or "{}") or {}
+        except ValueError:
+            payload = {}
+        r["progress"] = redact(_clip((payload.get("note") or payload.get("reason")) if isinstance(payload, dict) else "", 250))
+        r["title"] = redact(_clip(r["title"], 200))
+        tasks[r["id"]] = r
+    return tasks
+
+
+def _delivery_runs(db: Path, project: str) -> dict[str, list[dict[str, Any]]]:
+    rows = query(db, "SELECT r.task_id, r.profile, r.status, r.started_at, r.ended_at "
+                     "FROM task_runs r JOIN tasks t ON t.id = r.task_id "
+                     "WHERE t.project_id = ? AND t.status != 'archived' ORDER BY r.started_at DESC, r.id DESC LIMIT 100", (project,))
+    runs: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        runs.setdefault(row.pop("task_id"), []).append(row)
+    return runs
+
+
+def _delivery_progress(goal: dict[str, Any], tasks: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    required = goal["task_ids"]
+    verified = goal.get("verified", {})
+    accepted = sum(tasks.get(t, {}).get("status") == "done" and t in verified and
+                   verified[t] == tasks[t].get("completed_at") for t in required)
+    status = goal["status"]
+    if status == "done" and (not required or accepted != len(required) or not goal.get("evidence")):
+        status = "needs_review"
+    return {**goal, "status": status, "accepted": accepted, "required": len(required)}
+
+
+def _delivery_state(project: str) -> Path:
+    return _hub_dir("delivery") / f"{project}.json"
+
+
+@router.get("/delivery/{project}")
+def delivery_workflow(project: str) -> dict[str, Any]:
+    snapshot_at = time.time()
+    p, db = _delivery_scope(project)
+    tasks = _delivery_tasks(db, project)
+    state = _read_json(_delivery_state(project), {})
+    # A binding change never lets a previously approved task match a task on another board.
+    same_board = state.get("board") == p["board_slug"]
+    goals = [_delivery_progress(g, tasks if same_board else {}) for g in state.get("goals", [])]
+    current = next((g["id"] for g in goals if g["id"] == state.get("current") and g["status"] in ("active", "needs_review")), None)
+    current = current or next((g["id"] for g in goals if g["status"] in ("active", "needs_review")), None)
+    return {"project": project, "board": p["board_slug"], "at": snapshot_at, "binding_changed": bool(goals) and not same_board, "current": current,
+            "tasks": [t for t in tasks.values() if t["status"] != "archived"], "goals": goals, "runs": _delivery_runs(db, project)}
+
+
+def _delivery_text(value: Any, limit: int) -> str:
+    return redact(_clip(value.strip(), limit)) if isinstance(value, str) else ""
+
+
+@router.post("/delivery/{project}/goals")
+def delivery_goal(project: str, body: dict[str, Any]) -> dict[str, Any]:
+    p, db = _delivery_scope(project)
+    with _automation_gate():
+        path = _delivery_state(project)
+        state = _read_json(path, {"board": p["board_slug"], "goals": []})
+        if state["board"] != p["board_slug"] and state["goals"]:
+            raise HTTPException(409, "Project board changed; existing goal history is preserved on its original board")
+        state["board"] = p["board_slug"]
+        goals = state["goals"]
+        action = body.get("action")
+        now = time.time()
+        tasks = _delivery_tasks(db, project)
+        if action == "create":
+            title = _delivery_text(body.get("title"), 120)
+            criteria = _delivery_text(body.get("criteria"), 1500)
+            owner, reviewer = body.get("owner"), body.get("reviewer")
+            agents = list_agents()
+            if not title or not criteria or owner not in agents or reviewer not in agents:
+                raise HTTPException(400, "Provide an outcome, acceptance criteria, owner and reviewer")
+            active = [g for g in goals if _delivery_progress(g, tasks)["status"] in ("active", "needs_review")]
+            if len(active) >= 3 or any(g["title"].casefold() == title.casefold() for g in active):
+                raise HTTPException(409, "Duplicate outcome or three open goals already")
+            goal = {"id": secrets.token_hex(8), "title": title, "criteria": criteria, "owner": owner,
+                    "reviewer": reviewer, "status": "active", "task_ids": [], "history": []}
+            goals.append(goal)
+        else:
+            goal = next((g for g in goals if g["id"] == body.get("id")), None)
+            if goal is None:
+                raise HTTPException(404, "Unknown goal")
+            status = _delivery_progress(goal, tasks)["status"]
+            if action == "focus" and status in ("active", "needs_review"):
+                state["current"] = goal["id"]
+            elif action == "link" and status in ("active", "needs_review"):
+                ids = body.get("task_ids")
+                if not isinstance(ids, list) or len(ids) > 100 or any(not isinstance(i, str) or i not in tasks or tasks[i]["status"] == "archived" for i in ids):
+                    raise HTTPException(400, "Select valid task IDs from this project")
+                goal["task_ids"] = list(dict.fromkeys(ids))
+                goal["verified"] = {i: at for i, at in goal.get("verified", {}).items() if i in goal["task_ids"]}
+                goal["status"] = "active"
+                goal.pop("evidence", None)
+            elif action == "verify_task" and status in ("active", "needs_review"):
+                task_id = body.get("task_id")
+                evidence = _delivery_text(body.get("evidence"), 1500)
+                if task_id not in goal["task_ids"] or not evidence or tasks.get(task_id, {}).get("status") != "done" or not tasks[task_id].get("completed_at"):
+                    raise HTTPException(409, "Verify a completed required task with evidence")
+                goal.setdefault("verified", {})[task_id] = tasks[task_id]["completed_at"]
+                goal["status"] = "active"
+                goal.pop("evidence", None)
+            elif action == "accept" and status in ("active", "needs_review"):
+                evidence = _delivery_text(body.get("evidence"), 1500)
+                progress = _delivery_progress(goal, tasks)
+                if not evidence or not progress["required"] or progress["accepted"] != progress["required"]:
+                    raise HTTPException(409, "Goal acceptance needs its own evidence and verification of every required task")
+                goal.update(status="done", evidence=evidence)
+            elif action == "archive" and status != "archived":
+                reason = _delivery_text(body.get("reason"), 500)
+                if not reason or body.get("confirm") is not True:
+                    raise HTTPException(400, "Confirm archive and specify a reason")
+                goal.update(status="archived", archive_reason=reason)
+            else:
+                raise HTTPException(409, "Action does not apply to this goal")
+        goal["history"].append({"action": action, "at": now, "by": "hub-user",
+                                **({"evidence": goal["evidence"]} if action == "accept" else {}),
+                                **({"task_id": task_id, "evidence": evidence} if action == "verify_task" else {}),
+                                **({"reason": goal["archive_reason"]} if action == "archive" else {})})
+        _write_json(path, state)
+    return _delivery_progress(goal, tasks)
+
+
+_DELIVERY_RUNNERS = {
+    "hermes": "Use the assigned Hermes profile and its approved tools.",
+    "codex": "Use the Codex skill and Codex CLI for this card only, with an approved workspace sandbox. Never bypass approvals or use full machine access.",
+    "claude": "Use the Claude Code skill and Claude Code for this card only, in an approved isolated runner. Do not bypass approvals or allow unreviewed MCP servers and hooks.",
+    "gemini": "Use Gemini as the model in Hermes; execute with this profile's Hermes tools, not Gemini CLI.",
+}
+
+
+@router.post("/delivery/{project}/tasks")
+def delivery_create_task(project: str, body: dict[str, Any]) -> dict[str, Any]:
+    p, _ = _delivery_scope(project)
+    title = _delivery_text(body.get("title"), 120)
+    criteria = _delivery_text(body.get("criteria"), 2000)
+    agent, runner = body.get("assignee"), body.get("runner")
+    if not title or not criteria or agent not in list_agents() or not isinstance(runner, str) or runner not in _DELIVERY_RUNNERS:
+        raise HTTPException(400, "Provide a task title, criteria, assignee and supported runtime")
+    if runner in ("codex", "claude") and not p["primary_path"]:
+        raise HTTPException(409, "A native coding runner requires a project repo")
+    model = body.get("model", "")
+    if runner == "gemini" and (not isinstance(model, str) or not re.fullmatch(r"gemini-[a-z0-9_.-]{1,90}", model)):
+        raise HTTPException(400, "Specify the configured Gemini model ID, never an API key")
+    brief = (f"Runtime: {runner}\n{_DELIVERY_RUNNERS[runner]}\n\nAcceptance criteria:\n{criteria}\n\n"
+             "Use only this task's workspace and provider credentials configured by the owner. If permissions, login, "
+             "or isolation are missing, block and report; do not widen access. Do not push, merge or deploy. "
+             "Post milestone updates on this card. Report commit/diff, test results and blockers without secrets. "
+             "Request Kanban review after implementing; a successful CLI exit is not acceptance.")
+    dedup = hashlib.sha256(json.dumps([project, title, criteria, agent, runner, model if runner == "gemini" else ""]).encode()).hexdigest()[:24]
+    args = ["kanban", "--board", p["board_slug"], "create", f"--body={brief}", "--project", project,
+            "--assignee", agent, "--initial-status", "blocked", "--created-by", "agents-hub-delivery", "--idempotency-key", f"hub-delivery-{dedup}"]
+    if p["primary_path"]:
+        args += ["--workspace", "worktree"]
+    if runner in ("codex", "claude"):
+        args += ["--skill", {"codex": "codex", "claude": "claude-code"}[runner], "--max-runtime", "30m", "--max-retries", "1"]
+    if runner == "gemini":
+        args += ["--model", model, "--provider", "gemini"]
+    if _run_hermes([*args, "--", title]) != 0:
+        raise HTTPException(502, "Hermes could not create the draft on this board")
+    return {"board": p["board_slug"], "status": "blocked", "runtime": runner}
+
+
+@router.get("/delivery/legacy/preview")
+def delivery_legacy_preview() -> dict[str, Any]:
+    items = []
+    for agent in list_agents():
+        for goal in _goal_state(agent)["goals"]:
+            if goal.get("status") == "active":
+                items.append({"agent": agent, "id": goal["id"], "title": redact(goal["title"]),
+                              "idle_days": _goal_idle_days(goal)})
+    return {"goals": items}
 
 
 # ─────────────── task heartbeat: token-free watchdog that keeps cards moving and reports flowing up ───────────────
@@ -1256,18 +1457,65 @@ def workflow() -> dict[str, Any]:
 # delegated card is done and its superior has nothing planned on it, the superior gets ONE "review the report
 # and continue" card. Cards it creates are authored by `agents-hub`, so they never trigger further report-ups.
 HB_EVERY_S = 60
-REVIEW_TITLE = "Nghiệm thu"
+REVIEW_TITLE = "Review"
 HB_PROMOTE_AFTER_S = 120
 HB_ANSWER_AFTER_S = 5 * 60
 HB_LOG_MAX = 300
 _hb_thread: Optional[threading.Thread] = None
 _hb_last: dict[str, Any] = {}
+_background_lock = threading.Lock()
+_AUTOMATION_FLAGS = ("task_heartbeat", "auto_switch_accounts")
+
+
+def _is_heartbeat_review(task: dict[str, Any]) -> bool:
+    return task.get("created_by") == "agents-hub" and str(task.get("title") or "").startswith(
+        (f"{REVIEW_TITLE}:", "Nghiệm thu")
+    )
+
+
+def _automation_path() -> Path:
+    return root_home() / "agents-hub" / "settings.json"
+
+
+def _background_allowed() -> bool:
+    return os.environ.get("AGENTS_HUB_NO_BACKGROUND") != "1"
+
+
+@contextmanager
+def _automation_gate():
+    """Serialize owner settings and mutations across backend processes on this Hermes home."""
+    db = sqlite3.connect(_hub_dir("") / "automation-lock.db", timeout=65)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        yield
+    finally:
+        db.close()
+
+
+@router.get("/settings/automation")
+def automation_settings() -> dict[str, bool]:
+    settings = _read_json(_automation_path(), {})
+    return {key: settings.get(key) is True for key in _AUTOMATION_FLAGS}
+
+
+@router.post("/settings/automation")
+def set_automation_settings(body: dict[str, Any]) -> dict[str, bool]:
+    if not body or any(key not in _AUTOMATION_FLAGS or not isinstance(value, bool) for key, value in body.items()):
+        raise HTTPException(400, "Expected boolean automation settings")
+    with _automation_gate():
+        path = _hub_dir("") / "settings.json"
+        settings = _read_json(path, {})
+        settings.update({key: settings.get(key) is True for key in _AUTOMATION_FLAGS})
+        settings.update(body)
+        _write_json(path, settings)
+    _start_background()
+    return automation_settings()
 
 
 def _hb_settings() -> dict[str, bool]:
-    s = _read_json(_hub_dir("") / "settings.json", {})
-    return {k: s.get(k, True) is not False for k in ("task_heartbeat", "auto_promote", "auto_answer_cards",
-                                                     "auto_report_up")}
+    s = _read_json(_automation_path(), {})
+    return {"task_heartbeat": s.get("task_heartbeat") is True,
+            **{key: s.get(key, True) is not False for key in ("auto_promote", "auto_answer_cards", "auto_report_up")}}
 
 
 def _hb_state() -> dict[str, Any]:
@@ -1287,7 +1535,10 @@ def _hb_log(entry: dict[str, Any]) -> None:
 
 
 def _kanban_cli(args: list[str]) -> int:
-    return _run_hermes(["kanban", *args])
+    with _automation_gate():
+        if not automation_settings()["task_heartbeat"]:
+            return -1
+        return _run_hermes(["kanban", *args])
 
 
 def _create_card(assignee: str, title: str, body: str, key: str, parents: Optional[list[str]] = None,
@@ -1324,8 +1575,7 @@ def plan_heartbeat(snap: dict[str, Any], state: dict[str, Any], now: float, sett
         since = state.get("report_since") or now
         reported = set(state.get("reported") or [])
         # a superior still busy with a review card gets the next batch after it, not a duplicate now
-        reviewing = {t["assignee"] for t in items.values() if t["created_by"] == "agents-hub"
-                     and t["status"] in OPEN and str(t["title"]).startswith(REVIEW_TITLE)}
+        reviewing = {t["assignee"] for t in items.values() if t["status"] in OPEN and _is_heartbeat_review(t)}
         per: dict[str, list[str]] = {}
         for t in items.values():
             sup = t["superior"]
@@ -1345,48 +1595,48 @@ def plan_heartbeat(snap: dict[str, Any], state: dict[str, Any], now: float, sett
 
 def _answer_body(t: dict[str, Any]) -> str:
     return "\n".join([
-        f"**@{t['assignee']} đang chờ bạn quyết định** trên `{t['id']}`: {t['title']}",
+        f"**@{t['assignee']} is waiting for your decision** on `{t['id']}`: {t['title']}",
         "",
-        f"> {t.get('block_reason') or 'Xem comment cuối của thẻ.'}",
+        f"> {t.get('block_reason') or 'See the latest comment on the task.'}",
         "",
-        "1. `kanban_show " + t["id"] + "`, đọc comment cuối.",
-        "2. Quyết định bằng `kanban_comment`. Việc chỉ Sếp quyết được (tiền, xuất bản, bí mật, quyền mới) thì ghi rõ và để thẻ chờ Sếp.",
-        "3. `kanban_unblock " + t["id"] + "` nếu đã gỡ được.",
-        "4. Complete thẻ này với summary: `ĐÃ TRẢ LỜI: <quyết định>` hoặc `CHỜ SẾP: <lý do>`.",
+        "1. Use `kanban_show " + t["id"] + "` and read the latest comment.",
+        "2. Record the decision with `kanban_comment`. If only the owner can decide (spending, publishing, secrets, new access), say why and leave the task blocked.",
+        "3. Use `kanban_unblock " + t["id"] + "` if the blocker is resolved.",
+        "4. Complete this card with `ANSWERED: <decision>` or `WAITING ON OWNER: <reason>`.",
     ])
 
 
 def _review_title(items: dict[str, dict[str, Any]], ids: list[str]) -> str:
     first = (items.get(ids[0]) or {}).get("title") or ids[0]
-    more = f" (+{len(ids) - 1} thẻ)" if len(ids) > 1 else ""
+    more = f" (+{len(ids) - 1} more)" if len(ids) > 1 else ""
     return _clip(f"{REVIEW_TITLE}: {first}{more}", 140)
 
 
 def _report_body(items: dict[str, dict[str, Any]], ids: list[str]) -> str:
     rows = [f"| `{i}` | @{(items.get(i) or {}).get('assignee')} | {_clip((items.get(i) or {}).get('title'), 90)} |" for i in ids]
     return "\n".join([
-        "**Cấp dưới đã xong việc bạn giao. Hãy nghiệm thu và giao bước tiếp.**",
+        "**Your teammates have submitted their work. Verify the results and plan the next step.**",
         "",
-        "| Thẻ | Người làm | Việc |",
+        "| Task | Assignee | Outcome |",
         "|---|---|---|",
         *rows,
         "",
-        "1. `kanban_show` từng thẻ, kiểm đầu ra thật (file, số liệu). Không chỉ đọc lời tự báo cáo.",
-        "2. Đạt thì comment `NGHIỆM THU: ĐẠT`. Chưa đạt thì giao thẻ sửa cụ thể cho đúng người.",
-        "3. Việc tiếp theo phải chờ nhiều thẻ thì tạo thẻ có `parents` = các thẻ đó (tự chạy khi xong).",
-        "4. Complete thẻ này, summary bắt đầu bằng `ĐẠT` hoặc `KHÔNG ĐẠT`, kèm 1 câu kết luận.",
+        "1. Use `kanban_show` on each task and verify the actual output (files, results, checks). Do not rely on self-reports.",
+        "2. If accepted, comment `REVIEW: PASS`. Otherwise, assign a specific fix to the right person.",
+        "3. For follow-up work that depends on multiple tasks, set those tasks as `parents`.",
+        "4. Complete this card with a summary starting with `PASS` or `FAIL`, followed by a short verdict.",
     ])
 
 
 def run_heartbeat() -> dict[str, Any]:
     settings = _hb_settings()
+    if not settings["task_heartbeat"]:
+        return {"enabled": False}
     now = time.time()
     state = _hb_state()
     if "report_since" not in state:  # first run: only cards finished from now on are reported up (no backlog flood)
         state["report_since"] = now
         _write_json(_hub_dir("") / "task-heartbeat.json", state)
-    if not settings["task_heartbeat"]:
-        return {"enabled": False}
     snap = workflow_snapshot(now)
     # cards already put in a review card (log of earlier runs, older versions included) are never reported again
     state["reported"] = sorted(set(state.get("reported") or []).union(*_review_map().values()))[-3000:]
@@ -1394,6 +1644,8 @@ def run_heartbeat() -> dict[str, Any]:
     done_keys = set(state.get("done_keys") or [])
     applied = []
     for a in actions:
+        if not automation_settings()["task_heartbeat"]:
+            break
         key = a.get("key") or f"promote-{a.get('task')}"
         if key in done_keys:
             continue
@@ -1402,7 +1654,7 @@ def run_heartbeat() -> dict[str, Any]:
             ok = _kanban_cli(["promote", a["task"], "agents-hub heartbeat: all parents are done"]) == 0
         elif a["do"] == "answer":
             t = snap["tasks"][a["task"]]
-            ok = _create_card(a["agent"], _clip(f"Trả lời @{t['assignee']}: {t['title']}", 150), _answer_body(t), a["key"], priority=6)
+            ok = _create_card(a["agent"], _clip(f"Answer @{t['assignee']}: {t['title']}", 150), _answer_body(t), a["key"], priority=6)
         elif a["do"] == "report_up":
             ok = _create_card(a["agent"], _review_title(snap["tasks"], a["tasks"]),
                               _report_body(snap["tasks"], a["tasks"]), a["key"], priority=5)
@@ -1442,8 +1694,13 @@ def _hb_lease() -> bool:
 
 
 def _hb_loop(delay: float = 0) -> None:
+    global _hb_thread
     time.sleep(delay)
     while True:
+        with _background_lock:
+            if not _background_allowed() or not automation_settings()["task_heartbeat"]:
+                _hb_thread = None
+                return
         try:
             if _hb_lease():
                 run_heartbeat()
@@ -1454,9 +1711,10 @@ def _hb_loop(delay: float = 0) -> None:
 
 def _ensure_hb_thread(delay: float = 0) -> None:
     global _hb_thread
-    if _hb_thread is None or not _hb_thread.is_alive():
-        _hb_thread = threading.Thread(target=_hb_loop, args=(delay,), name="agents-hub-task-heartbeat", daemon=True)
-        _hb_thread.start()
+    with _background_lock:
+        if _background_allowed() and automation_settings()["task_heartbeat"] and (_hb_thread is None or not _hb_thread.is_alive()):
+            _hb_thread = threading.Thread(target=_hb_loop, args=(delay,), name="agents-hub-task-heartbeat", daemon=True)
+            _hb_thread.start()
 
 
 # ───────────────────────────────── changes ───────────────────────────────────
@@ -3363,19 +3621,19 @@ def _gc_logins() -> None:
 
 
 def _pool_ids(provider: str) -> list[str]:
-    """Ids of the pooled credentials for ``provider`` (ids only, never a secret). Profiles share the root pool."""
-    try:
-        data = json.loads((root_home() / "auth.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    pool = (data.get("credential_pool") or {}).get(provider) or []
-    return [str(e.get("id")) for e in pool if isinstance(e, dict) and e.get("id")]
+    """Get only credential IDs through Hermes's credential pool API."""
+    return [str(entry.id) for entry in _pool_entries(provider) if entry.id]
 
 
 def _run_hermes(args: list[str]) -> int:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    env = {**os.environ, "HERMES_HOME": str(root_home())}
+    if args[:2] == ["kanban", "--board"]:
+        for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK"):
+            env.pop(key, None)
+        env["HERMES_KANBAN_HOME"] = env["HERMES_HOME"]
     try:
-        return subprocess.run(_hermes_argv() + args, capture_output=True, timeout=60, creationflags=flags).returncode
+        return subprocess.run(_hermes_argv() + args, capture_output=True, timeout=60, creationflags=flags, env=env).returncode
     except (OSError, subprocess.SubprocessError):
         return -1
 
@@ -3387,18 +3645,19 @@ def _use_new_login(sess: dict[str, Any]) -> None:
     if sess.get("promoted") is not None:
         return
     before = set(sess.get("pool_before") or [])
-    new = [i for i in _pool_ids(sess["provider"]) if i not in before]
+    ids = _pool_ids(sess["provider"])
+    new = [i for i in ids if i not in before]
     sess["promoted"] = False
     if new:
-        sess["promoted"] = _run_hermes(["auth", "priority", sess["provider"], new[-1], "0"]) == 0
-        sess["active_id"] = new[-1]
+        sess["promoted"] = _prioritize_account(sess["provider"], ids[0], new[-1])
+        if sess["promoted"]:
+            sess["active_id"] = new[-1]
     _usage_forget(sess["provider"])
 
 
 # ───────────── automatic account switching (Claude/Codex accounts in the shared credential pool) ─────────────
-# Owner rule (31/10/2026): when the account in use runs out of its 5-hour or weekly limit, switch to the next
-# account; remove an account whose login is dead (refresh rejected); if the next one is out too, keep going
-# round until back at the first account; use the first account that still has both limits left.
+# Opt-in only: switch to a usable account when the current one is exhausted or unusable.
+# Unusable accounts stay in the pool until the owner explicitly removes them in Settings.
 ROTATE_EVERY_S = 300      # background check period
 ROTATE_KICK_S = 60        # earliest re-check after the account in use showed a full window
 FULL_PCT = 99.5           # a window at/above this is used up
@@ -3409,19 +3668,55 @@ _rotation_thread: Optional[threading.Thread] = None
 
 
 def _rotation_enabled() -> bool:
-    return _read_json(_hub_dir("") / "settings.json", {}).get("auto_switch_accounts", True) is not False
+    return automation_settings()["auto_switch_accounts"]
+
+
+@contextmanager
+def _root_pool_scope():
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(root_home())
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _persisted_entries(provider: str) -> list[Any]:
+    from agent.credential_pool import PooledCredential
+    from hermes_cli.auth import read_credential_pool
+    entries = [PooledCredential.from_dict(provider, row) for row in read_credential_pool(provider)
+               if isinstance(row, dict) and row.get("id")]
+    return sorted(entries, key=lambda e: (e.priority, e.id))
 
 
 def _pool_entries(provider: str) -> list[Any]:
-    """The provider's pool, in use order (priority 0 first)."""
-    from agent.credential_pool import load_pool
-    return sorted(load_pool(provider).entries(), key=lambda e: (e.priority, e.id))
+    """Inspect the root pool without load_pool()'s seeding, pruning or refresh."""
+    with _root_pool_scope():
+        return _persisted_entries(provider)
+
+
+def _prioritize_account(provider: str, current_id: str, target_id: str) -> bool:
+    """Reorder persisted rows under Hermes's auth lock. Never prune or resurrect a removed row."""
+    from hermes_cli.auth import _auth_store_lock, read_credential_pool, write_credential_pool
+    with _root_pool_scope(), _auth_store_lock():
+        rows = read_credential_pool(provider)
+        if not rows or any(not isinstance(row, dict) or not row.get("id") for row in rows):
+            return False
+        rows = sorted(rows, key=lambda row: (row.get("priority", 0), row["id"]))
+        target = next((row for row in rows if row["id"] == target_id), None)
+        if rows[0]["id"] != current_id or target is None or target.get("last_status") == "dead":
+            return False
+        ordered = [target, *(row for row in rows if row["id"] != target_id)]
+        write_credential_pool(provider, [{**row, "priority": i} for i, row in enumerate(ordered)])
+        return True
 
 
 def _plan_lapsed(provider: str, entry: Any) -> bool:
     """The account's live usage reports a non-paid plan (falls back to the token claim when usage gives none)."""
     from agent.account_usage import fetch_account_usage
     try:
+        if not entry.runtime_api_key:
+            return False
         d = _snapshot_dict(fetch_account_usage(provider, base_url=entry.runtime_base_url, api_key=entry.runtime_api_key,
                                                read_only=True, identity_id=entry.id)) or {}
     except Exception:
@@ -3433,25 +3728,12 @@ def _plan_lapsed(provider: str, entry: Any) -> bool:
 def _entry_windows(provider: str, entry: Any) -> Optional[list[dict[str, Any]]]:
     """One account's usage windows, read with THAT account's token (read-only: never rotates). None = unknown."""
     from agent.account_usage import fetch_account_usage
+    if not entry.runtime_api_key:
+        return None
     snap = fetch_account_usage(provider, base_url=entry.runtime_base_url, api_key=entry.runtime_api_key,
                                read_only=True, identity_id=entry.id)
     d = _snapshot_dict(snap)
     return (d or {}).get("windows") or None
-
-
-def _refresh_entry(provider: str, entry_id: str) -> tuple[Optional[Any], bool]:
-    """Refresh one account's tokens. Returns (fresh entry or None, dead): dead only when Hermes itself
-    recorded the login as terminally rejected, never on a network error."""
-    from agent.credential_pool import STATUS_DEAD, load_pool
-    pool = load_pool(provider)
-    try:
-        fresh = pool.try_refresh_matching(credential_id=entry_id)
-    except Exception:
-        fresh = None
-    if fresh is not None:
-        return fresh, False
-    after = next((e for e in load_pool(provider).entries() if e.id == entry_id), None)
-    return None, bool(after is not None and after.last_status == STATUS_DEAD)
 
 
 def _account_state(provider: str, entry: Any) -> dict[str, Any]:
@@ -3462,15 +3744,6 @@ def _account_state(provider: str, entry: Any) -> dict[str, Any]:
         wins = _entry_windows(provider, entry)
     except Exception:
         wins = None
-    if wins is None:  # expired token or a hiccup: refresh once, then read again
-        fresh, dead = _refresh_entry(provider, entry.id)
-        if dead:
-            return {"state": "dead"}
-        if fresh is not None:
-            try:
-                wins = _entry_windows(provider, fresh)
-            except Exception:
-                wins = None
     if not wins:
         return {"state": "unknown"}
     if provider == "openai-codex" and _plan_lapsed(provider, entry):  # paid plan lapsed to free: skip, never remove
@@ -3482,8 +3755,8 @@ def _account_state(provider: str, entry: Any) -> dict[str, Any]:
 
 def plan_rotation(entries: list[Any], state_of: Callable[[Any], dict[str, Any]]) -> dict[str, Any]:
     """Pure decision: keep the account in use while it has both limits left; otherwise walk the others in pool
-    order (back round to the first) and use the first one with both limits left. Dead logins are removed."""
-    plan: dict[str, Any] = {"use": None, "remove": [], "states": {}}
+    order and use the first healthy account. Unusable entries are recorded, not removed."""
+    plan: dict[str, Any] = {"use": None, "states": {}}
     if not entries:
         return plan
     cur = entries[0]
@@ -3491,14 +3764,10 @@ def plan_rotation(entries: list[Any], state_of: Callable[[Any], dict[str, Any]])
     plan["states"][cur.id] = st["state"]
     if st["state"] in ("ok", "unknown"):  # unknown = could not read it now: never switch on a hiccup
         return plan
-    if st["state"] == "dead":
-        plan["remove"].append(cur.id)
     for e in entries[1:]:
         s = state_of(e)
         plan["states"][e.id] = s["state"]
-        if s["state"] == "dead":
-            plan["remove"].append(e.id)
-        elif s["state"] == "ok":
+        if s["state"] == "ok":
             plan["use"] = e.id
             break
     return plan
@@ -3516,27 +3785,30 @@ def _log_rotation(provider: str, plan: dict[str, Any], applied: dict[str, Any]) 
         pass
 
 
-def rotate_accounts(provider: str) -> dict[str, Any]:
-    """Check the account in use and switch/remove per the owner's rule. Ids only, never a secret."""
+def rotate_accounts(provider: str, *, automatic: bool = False) -> dict[str, Any]:
+    """Check the account in use and possibly reprioritize; never remove credentials."""
+    if automatic and (not _background_allowed() or not _rotation_enabled()):
+        return {"provider": provider, "enabled": False}
     if not _rotation_lock.acquire(blocking=False):
         return {"provider": provider, "busy": True}
     try:
         entries = _pool_entries(provider)
         plan = plan_rotation(entries, lambda e: _account_state(provider, e))
-        applied: dict[str, Any] = {"removed": [], "switched_to": None}
-        for rid in plan["remove"]:
-            if _run_hermes(["auth", "remove", provider, rid]) == 0:
-                applied["removed"].append(rid)
-        if plan["use"] and _run_hermes(["auth", "priority", provider, plan["use"], "0"]) == 0:
-            applied["switched_to"] = plan["use"]
-        if applied["removed"] or applied["switched_to"]:
+        applied: dict[str, Any] = {"switched_to": None}
+        with _automation_gate():
+            if automatic and (not _background_allowed() or not _rotation_enabled()):
+                return {"provider": provider, "enabled": False}
+            if plan["use"] and _prioritize_account(provider, entries[0].id, plan["use"]):
+                applied["switched_to"] = plan["use"]
+        if applied["switched_to"]:
             _usage_forget(provider)
+        if applied["switched_to"] or "dead" in plan["states"].values() or "expired" in plan["states"].values():
             _log_rotation(provider, plan, applied)
         before = entries[0].id if entries else None
         all_out = bool(entries) and not plan["use"] and plan["states"].get(before) != "ok"
         _rotation_state[provider] = {"checked_at": time.time(), "in_use": applied["switched_to"] or before,
-                                     "accounts": len(entries) - len(applied["removed"]), "states": plan["states"],
-                                     "switched_to": applied["switched_to"], "removed": applied["removed"],
+                                     "accounts": len(entries), "states": plan["states"],
+                                     "switched_to": applied["switched_to"],
                                      "all_used_up": all_out}
         return {"provider": provider, **_rotation_state[provider]}
     finally:
@@ -3544,49 +3816,58 @@ def rotate_accounts(provider: str) -> dict[str, Any]:
 
 
 def _rotation_loop(delay: float = 0) -> None:
+    global _rotation_thread
     time.sleep(delay)
     while True:
-        if _rotation_enabled():
-            for provider in HUB_PROVIDERS:
-                try:
-                    if len(_pool_entries(provider)) > 1:
-                        rotate_accounts(provider)
-                except Exception as e:  # never let the loop die
-                    _rotation_state[provider] = {"checked_at": time.time(), "error": redact(str(e))[:200]}
+        with _background_lock:
+            if not _background_allowed() or not _rotation_enabled():
+                _rotation_thread = None
+                return
+        for provider in HUB_PROVIDERS:
+            if not _rotation_enabled():
+                break
+            try:
+                if len(_pool_entries(provider)) > 1:
+                    rotate_accounts(provider, automatic=True)
+            except Exception as e:  # never let the loop die
+                _rotation_state[provider] = {"checked_at": time.time(), "error": redact(str(e))[:200]}
         time.sleep(ROTATE_EVERY_S)
 
 
 def _ensure_rotation_thread(delay: float = 0) -> None:
     global _rotation_thread
-    if _rotation_thread is None or not _rotation_thread.is_alive():
-        _rotation_thread = threading.Thread(target=_rotation_loop, args=(delay,), name="agents-hub-account-rotation",
-                                            daemon=True)
-        _rotation_thread.start()
+    with _background_lock:
+        if _background_allowed() and _rotation_enabled() and (_rotation_thread is None or not _rotation_thread.is_alive()):
+            _rotation_thread = threading.Thread(target=_rotation_loop, args=(delay,), name="agents-hub-account-rotation",
+                                                daemon=True)
+            _rotation_thread.start()
 
 
 def _kick_rotation(provider: str, usage: Optional[dict[str, Any]]) -> None:
     """The account in use just showed a used-up window: check now instead of waiting for the next round."""
     wins = (usage or {}).get("windows") or []
-    if not _rotation_enabled() or not any(isinstance(w.get("used_percent"), (int, float))
+    if not _background_allowed() or not _rotation_enabled() or not any(isinstance(w.get("used_percent"), (int, float))
                                           and w["used_percent"] >= FULL_PCT for w in wins):
         return
     last = (_rotation_state.get(provider) or {}).get("checked_at") or 0
     if time.time() - last >= ROTATE_KICK_S:
-        threading.Thread(target=rotate_accounts, args=(provider,), daemon=True).start()
+        threading.Thread(target=rotate_accounts, args=(provider,), kwargs={"automatic": True}, daemon=True).start()
 
 
 def _rotation_public(provider: str) -> Optional[dict[str, Any]]:
+    if not _rotation_enabled():
+        return None
     st = _rotation_state.get(provider)
     if not st or st.get("error"):
         return None
     return {"accounts": st.get("accounts"), "checked_at": st.get("checked_at"), "switched_to": st.get("switched_to"),
-            "removed": len(st.get("removed") or []), "all_used_up": st.get("all_used_up"),
+            "needs_attention": sum(s in ("dead", "expired") for s in (st.get("states") or {}).values()),
+            "all_used_up": st.get("all_used_up"),
             "states": list((st.get("states") or {}).values())}
 
 
 @router.get("/accounts/rotation")
 def accounts_rotation() -> dict[str, Any]:
-    _ensure_rotation_thread()
     log = []
     try:
         for line in (_hub_dir("") / "account-rotation.jsonl").read_text(encoding="utf-8").splitlines()[-20:]:
@@ -3640,18 +3921,17 @@ def account_verdict(row: dict[str, Any]) -> str:
 
 
 def _list_accounts(provider: str) -> dict[str, Any]:
-    from agent.credential_pool import load_pool
-    pool = load_pool(provider)
-    cur = pool.peek()
-    entries = sorted(pool.entries(), key=lambda e: (e.priority, e.id))
+    entries = _pool_entries(provider)
+    cur = next((e for e in entries if e.last_status != "dead"), None)
     rows = []
     for e in entries:
         facts = _token_facts(provider, getattr(e, "access_token", "") or "")
         usage = None
         try:  # read-only with this account's own token: never refreshes or rotates the pool
             from agent.account_usage import fetch_account_usage
-            usage = _snapshot_dict(fetch_account_usage(provider, base_url=e.runtime_base_url, api_key=e.runtime_api_key,
-                                                       read_only=True, identity_id=e.id))
+            if e.runtime_api_key:
+                usage = _snapshot_dict(fetch_account_usage(provider, base_url=e.runtime_base_url, api_key=e.runtime_api_key,
+                                                           read_only=True, identity_id=e.id))
         except Exception:
             usage = None
         row = {"id": e.id, "provider": provider, "label": e.label, "priority": e.priority, "source": e.source,
@@ -3841,9 +4121,7 @@ def _account_sig(provider: str) -> str:
     """Which login the numbers belong to: the pool entry ids in use order (ids only, never a secret).
     It changes when the owner re-authorizes anywhere (Hub, Settings, CLI), so old numbers are dropped."""
     try:
-        from agent.credential_pool import load_pool
-        entries, _pending = load_pool(provider)._available_entries(clear_expired=False, refresh=False)
-        return ",".join(str(getattr(e, "id", "")) for e in entries)
+        return ",".join(e.id for e in _persisted_entries(provider) if e.last_status != "dead")
     except Exception:
         return ""
 
@@ -3889,7 +4167,12 @@ def _fetch_usage_sync(agent: str, provider: str) -> dict[str, Any]:
         sig = _account_sig(provider)
         if status.get("logged_in"):
             from agent.account_usage import fetch_account_usage
-            snap = fetch_account_usage(provider, read_only=True)
+            entry = next((e for e in _persisted_entries(provider) if e.runtime_api_key and e.last_status != "dead"), None)
+            if entry is not None:
+                snap = fetch_account_usage(provider, base_url=entry.runtime_base_url, api_key=entry.runtime_api_key,
+                                           read_only=True, identity_id=entry.id)
+            elif provider == "anthropic":  # supports the existing Claude Code sign-in
+                snap = fetch_account_usage(provider, read_only=True)
     return {"status": status, "usage": _snapshot_dict(snap), "sig": sig}
 
 
@@ -3931,8 +4214,6 @@ def usage(agent: str = Query("default"), wait: float = Query(0.0, ge=0, le=20)) 
     """Claude + Codex usage for an agent's login. Answers from cache at once; a stale entry is
     refreshed in the background (single flight per agent/provider), so the UI never blocks."""
     _check_agent(agent)
-    _ensure_rotation_thread()
-    _ensure_hb_thread()
     now = time.time()
     threads = []
     for provider in HUB_PROVIDERS:
@@ -3962,11 +4243,9 @@ def usage(agent: str = Query("default"), wait: float = Query(0.0, ge=0, le=20)) 
 
 
 def _start_background() -> None:
-    """Task heartbeat and account switching run as soon as Hermes loads the plugin, not only while the Hub page
-    is open and polling: work must keep moving with the window closed."""
-    if os.environ.get("AGENTS_HUB_NO_BACKGROUND") == "1":
+    """Resume only the background jobs the owner enabled; GET requests never start them."""
+    if not _background_allowed():
         return
-    # a short delay: one-shot imports (`hermes plugins validate`) exit before doing any work
     _ensure_hb_thread(delay=30)
     _ensure_rotation_thread(delay=45)
 

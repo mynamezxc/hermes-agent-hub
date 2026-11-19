@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 REAL = Path(os.environ.get("AGENTS_HUB_REAL_HOME") or Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "hermes")
@@ -871,16 +872,21 @@ class TeamSetupUsageTest(unittest.TestCase):
     def test_new_login_becomes_the_account_in_use(self):
         """Switching accounts in the Hub: the new credential lands last in the pool, so it must be moved to
         priority 0, otherwise Hermes keeps using the old (exhausted) account."""
-        pool = [{"id": "old1", "priority": 0}, {"id": "old2", "priority": 1}]
-        (self.home / "auth.json").write_text(json.dumps({"credential_pool": {"openai-codex": pool}}), encoding="utf-8")
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        pool = [SimpleNamespace(id="old1", priority=0), SimpleNamespace(id="old2", priority=1)]
+        with patch.object(self.m, "_persisted_entries", side_effect=lambda provider: pool):
+            self._check_new_login_priority(pool)
+
+    def _check_new_login_priority(self, pool):
+        from types import SimpleNamespace
         calls = []
-        self.m._run_hermes = lambda args: calls.append(args) or 0
+        self.m._prioritize_account = lambda *args: calls.append(args) or True
         sess = {"provider": "openai-codex", "pool_before": self.m._pool_ids("openai-codex")}
         self.assertEqual(sess["pool_before"], ["old1", "old2"])
-        pool.append({"id": "new9", "priority": 2})
-        (self.home / "auth.json").write_text(json.dumps({"credential_pool": {"openai-codex": pool}}), encoding="utf-8")
+        pool.append(SimpleNamespace(id="new9", priority=2))
         self.m._use_new_login(sess)
-        self.assertEqual(calls, [["auth", "priority", "openai-codex", "new9", "0"]])
+        self.assertEqual(calls, [("openai-codex", "old1", "new9")])
         self.assertTrue(sess["promoted"])
         self.m._use_new_login(sess)  # polled again: no second reorder
         self.assertEqual(len(calls), 1)
@@ -1464,8 +1470,7 @@ class TeamVisibilityTest(unittest.TestCase):
 
 
 class AccountRotationTest(unittest.TestCase):
-    """Owner rule: account in use out of its 5h/weekly limit -> next account; dead login -> removed; next also
-    out -> keep going round to the first; use the first account with both limits left."""
+    """Switch to the first usable account when opted in; keep rejected logins for manual review."""
 
     def setUp(self):
         home = FIX / "rotation" / "home"
@@ -1490,16 +1495,17 @@ class AccountRotationTest(unittest.TestCase):
 
     def test_keep_account_with_both_limits_left(self):
         p, seen = self.plan({"a": "ok", "b": "ok", "c": "ok", "d": "ok"})
-        self.assertEqual((p["use"], p["remove"], seen), (None, [], ["a"]))  # others are not even read
+        self.assertEqual((p["use"], p["states"], seen), (None, {"a": "ok"}, ["a"]))
 
     def test_used_up_switches_to_next_with_limits_left(self):
         p, seen = self.plan({"a": "full", "b": "full", "c": "ok", "d": "ok"})
         self.assertEqual(p["use"], "c")
         self.assertEqual(seen, ["a", "b", "c"])
 
-    def test_dead_logins_are_removed_on_the_way(self):
+    def test_dead_logins_are_flagged_on_the_way(self):
         p, _ = self.plan({"a": "dead", "b": "dead", "c": "full", "d": "ok"})
-        self.assertEqual(p["remove"], ["a", "b"])
+        self.assertNotIn("remove", p)
+        self.assertEqual(p["states"], {"a": "dead", "b": "dead", "c": "full", "d": "ok"})
         self.assertEqual(p["use"], "d")
 
     def test_all_used_up_stays_on_the_first(self):
@@ -1511,31 +1517,51 @@ class AccountRotationTest(unittest.TestCase):
         p, seen = self.plan({"a": "unknown", "b": "ok", "c": "ok", "d": "ok"})
         self.assertEqual((p["use"], seen), (None, ["a"]))
 
-    def test_account_state_reads_windows_and_refreshes_expired(self):
+    def test_account_state_reads_windows_without_refreshing(self):
         from types import SimpleNamespace
         e = SimpleNamespace(id="a", last_status=None)
+        self.m._plan_lapsed = lambda prov, ent: False
         self.m._entry_windows = lambda prov, ent: [{"label": "Session", "used_percent": 100, "reset_at": 9e9},
                                                    {"label": "Weekly", "used_percent": 40}]
         self.assertEqual(self.m._account_state("openai-codex", e)["state"], "full")
         self.m._entry_windows = lambda prov, ent: [{"label": "Session", "used_percent": 20},
                                                    {"label": "Weekly", "used_percent": 99}]
         self.assertEqual(self.m._account_state("openai-codex", e)["state"], "ok")
-        self.m._entry_windows = lambda prov, ent: None  # token expired and the refresh was rejected
-        self.m._refresh_entry = lambda prov, i: (None, True)
-        self.assertEqual(self.m._account_state("openai-codex", e)["state"], "dead")
-        self.m._refresh_entry = lambda prov, i: (None, False)  # network hiccup: never removed
+        self.m._entry_windows = lambda prov, ent: None
         self.assertEqual(self.m._account_state("openai-codex", e)["state"], "unknown")
+        e.last_status = "dead"
+        self.assertEqual(self.m._account_state("openai-codex", e)["state"], "dead")
 
-    def test_rotate_applies_plan_with_hermes_cli(self):
+    def test_rotate_only_changes_priority(self):
         calls = []
         self.m._pool_entries = lambda prov: self.entries("a", "b", "c")
         states = {"a": "full", "b": "dead", "c": "ok"}
         self.m._account_state = lambda prov, e: {"state": states[e.id]}
-        self.m._run_hermes = lambda args: calls.append(args) or 0
+        self.m._prioritize_account = lambda *args: calls.append(args) or True
         r = self.m.rotate_accounts("openai-codex")
-        self.assertEqual(calls, [["auth", "remove", "openai-codex", "b"], ["auth", "priority", "openai-codex", "c", "0"]])
-        self.assertEqual((r["switched_to"], r["removed"], r["accounts"]), ("c", ["b"], 2))
+        self.assertEqual(calls, [("openai-codex", "a", "c")])
+        self.assertEqual((r["switched_to"], r["states"]["b"], r["accounts"]), ("c", "dead", 3))
         self.assertTrue((self.m._hub_dir("") / "account-rotation.jsonl").exists())
+
+    def test_root_priority_update_preserves_rejected_and_profile_entries(self):
+        from hermes_cli.auth import read_credential_pool, write_credential_pool
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+        provider = "openai-codex"
+        write_credential_pool(provider, [{"id": "a", "priority": 0},
+                                         {"id": "b", "priority": 1, "last_status": "dead"},
+                                         {"id": "c", "priority": 2}])
+        profile = self.m.root_home() / "profiles" / "test"
+        token = set_hermes_home_override(profile)
+        try:
+            write_credential_pool(provider, [{"id": "local", "priority": 0}])
+            self.assertEqual(self.m._pool_ids(provider), ["a", "b", "c"])
+            self.assertTrue(self.m._prioritize_account(provider, "a", "c"))
+            self.assertFalse(self.m._prioritize_account(provider, "a", "b"))
+            self.assertEqual([row["id"] for row in read_credential_pool(provider)], ["local"])
+        finally:
+            reset_hermes_home_override(token)
+        self.assertEqual([(row["id"], row["priority"], row.get("last_status")) for row in read_credential_pool(provider)],
+                         [("c", 0, None), ("a", 1, None), ("b", 2, "dead")])
 
     def test_lapsed_codex_plan_is_skipped_not_removed(self):
         from types import SimpleNamespace
@@ -1544,7 +1570,60 @@ class AccountRotationTest(unittest.TestCase):
         self.m._plan_lapsed = lambda prov, ent: True
         self.assertEqual(self.m._account_state("openai-codex", e)["state"], "expired")
         p, _ = self.plan({"a": "expired", "b": "ok", "c": "ok", "d": "ok"})
-        self.assertEqual((p["use"], p["remove"]), ("b", []))  # switch away, keep the login for the owner to decide
+        self.assertEqual((p["use"], p["states"]["a"]), ("b", "expired"))
+
+    def test_automation_is_opt_in_and_gets_do_not_start_workers(self):
+        from unittest.mock import patch
+        missing = self.m.root_home() / "agents-hub" / "settings.json"
+        missing.unlink(missing_ok=True)
+        with patch.dict(os.environ), patch.object(self.m, "threading") as threads:
+            os.environ.pop("AGENTS_HUB_NO_BACKGROUND", None)
+            self.m._start_background()
+            self.assertFalse(self.m.workflow()["heartbeat"]["enabled"])
+            self.assertFalse(self.m.accounts_rotation()["enabled"])
+            self.m._kick_rotation("openai-codex", {"windows": [{"used_percent": 100}]})
+            self.assertEqual(self.m.run_heartbeat(), {"enabled": False})
+            threads.Thread.assert_not_called()
+        self.assertFalse(missing.with_name("task-heartbeat.json").exists())
+
+    def test_automation_settings_persist_explicit_switches(self):
+        from unittest.mock import patch
+        path = self.m.root_home() / "agents-hub" / "settings.json"
+        self.m._write_json(self.m._hub_dir("") / "settings.json", {"auto_promote": False})
+        with patch.object(self.m, "_start_background") as start:
+            self.assertEqual(self.m.set_automation_settings({"task_heartbeat": True}),
+                             {"task_heartbeat": True, "auto_switch_accounts": False})
+            start.assert_called_once_with()
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")),
+                         {"task_heartbeat": True, "auto_switch_accounts": False, "auto_promote": False})
+        with self.assertRaises(self.m.HTTPException):
+            self.m.set_automation_settings({"auto_switch_accounts": "true"})
+
+    def test_usage_get_does_not_start_mutating_workers(self):
+        from unittest.mock import patch
+        self.m._write_json(self.m._hub_dir("") / "settings.json",
+                           {"task_heartbeat": True, "auto_switch_accounts": True})
+        with patch.object(self.m, "_ensure_hb_thread") as hb, patch.object(self.m, "_ensure_rotation_thread") as rotate:
+            for provider in self.m.HUB_PROVIDERS:
+                self.m._usage_cache[("default", provider)] = {"at": time.time()}
+            self.m.usage(agent="default", wait=0)
+            hb.assert_not_called()
+            rotate.assert_not_called()
+
+    def test_disabling_auto_switch_during_probe_prevents_priority_change(self):
+        from unittest.mock import patch
+        path = self.m._hub_dir("") / "settings.json"
+        self.m._write_json(path, {"auto_switch_accounts": True})
+        self.m._pool_entries = lambda prov: self.entries("a", "b")
+        def state_of(prov, entry):
+            if entry.id == "b":
+                self.m.set_automation_settings({"auto_switch_accounts": False})
+            return {"state": "full" if entry.id == "a" else "ok"}
+        self.m._account_state = state_of
+        with patch.dict(os.environ), patch.object(self.m, "_start_background"), patch.object(self.m, "_prioritize_account") as prioritize:
+            os.environ.pop("AGENTS_HUB_NO_BACKGROUND", None)
+            self.assertFalse(self.m.rotate_accounts("openai-codex", automatic=True)["enabled"])
+            prioritize.assert_not_called()
 
 
 class AccountListTest(unittest.TestCase):
@@ -1682,6 +1761,7 @@ class WorkflowHeartbeatTest(unittest.TestCase):
     def test_run_heartbeat_applies_once(self):
         calls = []
         self.m._run_hermes = lambda args: calls.append(args) or 0
+        self.m._write_json(self.m._hub_dir("") / "settings.json", {"task_heartbeat": True})
         self.m._write_json(self.m._hub_dir("") / "task-heartbeat.json", {"report_since": self.now - 7200})
         self.m.run_heartbeat()
         n = len(calls)
@@ -1689,8 +1769,78 @@ class WorkflowHeartbeatTest(unittest.TestCase):
         made = [c for c in calls if c[:2] == ["kanban", "create"]]
         self.assertTrue(all("--created-by" in c and c[c.index("--created-by") + 1] == "agents-hub" for c in made))
         self.assertEqual({c[c.index("--assignee") + 1] for c in made}, {"tech-lead", "manager"})
+        answer = next(c for c in made if c[c.index("--assignee") + 1] == "tech-lead")
+        review = next(c for c in made if c[c.index("--assignee") + 1] == "manager")
+        self.assertTrue(answer[2].startswith("Answer @"))
+        self.assertIn("ANSWERED", answer[answer.index("--body") + 1])
+        self.assertTrue(review[2].startswith("Review: "))
+        self.assertIn("PASS", review[review.index("--body") + 1])
+        self.assertEqual(self.m.verdict_of("ANSWERED: clarified"), "answered")
+        self.assertEqual(self.m.verdict_of("WAITING ON OWNER: approval"), "owner")
         self.m.run_heartbeat()  # same board again: nothing new
         self.assertEqual(len(calls), n)
+
+
+class ProjectDeliveryTest(WorkflowHeartbeatTest):
+    def delivery_fixture(self):
+        with closing(sqlite3.connect(self.home / "projects.db")) as c, c:
+            c.execute("CREATE TABLE projects(id, slug, name, board_slug, primary_path, archived)")
+            c.executemany("INSERT INTO projects VALUES (?,?,?,'default',?,0)",
+                          [("p_a", "alpha", "Alpha", str(self.home)), ("p_b", "beta", "Beta", None)])
+        with closing(sqlite3.connect(self.home / "kanban.db")) as c, c:
+            c.execute("UPDATE tasks SET project_id='p_a' WHERE id='spec'")
+            c.execute("UPDATE tasks SET project_id='p_b' WHERE id='ui'")
+
+    def test_project_lifecycle_rejects_cross_scope_and_unverified_completion(self):
+        self.delivery_fixture()
+        change = self.m.delivery_goal
+        goal = change("p_a", {"action": "create", "title": "Publish staging build", "criteria": "CI and staging pass", "owner": "default", "reviewer": "manager"})
+        gid = goal["id"]
+        self.assertEqual([t["id"] for t in self.m.delivery_workflow("p_a")["tasks"]], ["spec"])
+        with self.assertRaises(self.m.HTTPException):
+            change("p_a", {"action": "link", "id": gid, "task_ids": ["ui"]})
+        change("p_a", {"action": "link", "id": gid, "task_ids": ["spec"]})
+        with self.assertRaises(self.m.HTTPException):
+            change("p_a", {"action": "accept", "id": gid, "evidence": "Staging output"})
+        change("p_a", {"action": "verify_task", "id": gid, "task_id": "spec", "evidence": "CI result"})
+        self.assertEqual(change("p_a", {"action": "accept", "id": gid, "evidence": "Staging output"})["status"], "done")
+        with closing(sqlite3.connect(self.home / "kanban.db")) as c, c:
+            c.execute("UPDATE tasks SET status='ready' WHERE id='spec'")
+        self.assertEqual(self.m.delivery_workflow("p_a")["goals"][0]["status"], "needs_review")
+        entry = change("p_a", {"action": "archive", "id": gid, "confirm": True, "reason": "Scope replaced"})
+        self.assertEqual(entry["status"], "archived")
+        self.assertEqual(entry["history"][-1]["reason"], "Scope replaced")
+
+    def test_native_task_draft_and_gemini_routing(self):
+        self.delivery_fixture()
+        calls = []
+        self.m._run_hermes = lambda args: calls.append(args) or 0
+        task = {"title": "Add checks", "criteria": "Tests pass", "assignee": "default"}
+        self.assertEqual(self.m.delivery_create_task("p_a", {**task, "runner": "codex"})["status"], "blocked")
+        self.assertEqual(calls[0][:4], ["kanban", "--board", "default", "create"])
+        self.assertEqual(calls[0][calls[0].index("--skill") + 1], "codex")
+        self.m.delivery_create_task("p_a", {**task, "runner": "claude"})
+        self.assertEqual(calls[1][calls[1].index("--skill") + 1], "claude-code")
+        with self.assertRaises(self.m.HTTPException):
+            self.m.delivery_create_task("p_b", {**task, "runner": "codex"})
+        self.m.delivery_create_task("p_b", {**task, "runner": "gemini", "model": "gemini-test"})
+        self.assertEqual(calls[2][calls[2].index("--provider") + 1], "gemini")
+
+    def test_project_workflow_never_falls_back_to_default_tasks(self):
+        db = self.home / "projects.db"
+        with closing(sqlite3.connect(db)) as c, c:
+            c.execute("CREATE TABLE projects(id, slug, name, board_slug, primary_path, archived)")
+            c.execute("INSERT INTO projects VALUES ('p_test','test','Test','missing',NULL,0)")
+        self.assertEqual(self.m.delivery_projects()["projects"][0]["id"], "p_test")
+        with self.assertRaises(self.m.HTTPException) as err:
+            self.m.delivery_workflow("p_test")
+        self.assertEqual(err.exception.status_code, 409)
+
+    def test_goal_needs_verified_task_and_evidence(self):
+        goal = {"status": "done", "task_ids": ["t1"], "evidence": "CI result", "verified": {"t1": 10}}
+        self.assertEqual(self.m._delivery_progress(goal, {"t1": {"status": "done", "completed_at": 10}})["status"], "done")
+        self.assertEqual(self.m._delivery_progress(goal, {"t1": {"status": "running", "completed_at": None}})["status"], "needs_review")
+        self.assertEqual(self.m._delivery_progress(goal, {"t1": {"status": "done", "completed_at": 20}})["status"], "needs_review")
 
 
 class ReviewFlowTest(WorkflowHeartbeatTest):
@@ -1715,6 +1865,7 @@ class ReviewFlowTest(WorkflowHeartbeatTest):
         self.assertFalse(any(a["do"] == "report_up" and a["agent"] == "manager" for a in acts))
 
     def test_run_records_reported_and_titles_name_the_work(self):
+        self.m._write_json(self.m._hub_dir("") / "settings.json", {"task_heartbeat": True})
         calls = []
         self.m._run_hermes = lambda args: calls.append(args) or 0
         self.m._write_json(self.m._hub_dir("") / "task-heartbeat.json", {"report_since": self.now - 7200})
@@ -1722,7 +1873,7 @@ class ReviewFlowTest(WorkflowHeartbeatTest):
         st = self.m._read_json(self.m._hub_dir("") / "task-heartbeat.json", {})
         self.assertIn("spec", st["reported"])
         titles = [c[2] for c in calls if c[:2] == ["kanban", "create"]]
-        self.assertIn("Nghiệm thu: Write spec", titles)
+        self.assertIn("Review: Write spec", titles)
 
     def test_verdict_and_acceptance_on_reviewed_cards(self):
         self.assertEqual(self.m.verdict_of("**Kết quả:** Nghiệm thu t_1: ĐẠT 23/23"), "pass")

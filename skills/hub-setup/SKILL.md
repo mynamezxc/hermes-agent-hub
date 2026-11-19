@@ -9,12 +9,10 @@ version: 1.1.0
 ## Install (once)
 
 ```
-curl -fsSL https://raw.githubusercontent.com/mynamezxc/hermes-agent-hub/main/install.sh | bash      # macOS / Linux
-irm https://raw.githubusercontent.com/mynamezxc/hermes-agent-hub/main/install.ps1 | iex             # Windows
-# or: hermes plugins install mynamezxc/hermes-agent-hub --enable
+hermes plugins install agents-hub --enable
 ```
 
-The scripts check that Hermes is installed, install or update the plugin and enable its agent half. Then, once:
+This installs the catalog plugin and enables its agent half. Then, once:
 1. Restart the gateway (Desktop: Ctrl+K, "Restart gateway").
 2. Turn on the desktop half: Hermes Desktop keeps a package's desktop half OFF until the owner enables it
    (`--enable` only covers the agent half). Settings > Plugins (or Capabilities > Plugins) > Agents Hub > Desktop on.
