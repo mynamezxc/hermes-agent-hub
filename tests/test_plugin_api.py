@@ -881,12 +881,12 @@ class TeamSetupUsageTest(unittest.TestCase):
     def _check_new_login_priority(self, pool):
         from types import SimpleNamespace
         calls = []
-        self.m._prioritize_account = lambda *args: calls.append(args) or True
+        self.m._run_hermes = lambda args: calls.append(args) or 0
         sess = {"provider": "openai-codex", "pool_before": self.m._pool_ids("openai-codex")}
         self.assertEqual(sess["pool_before"], ["old1", "old2"])
         pool.append(SimpleNamespace(id="new9", priority=2))
         self.m._use_new_login(sess)
-        self.assertEqual(calls, [("openai-codex", "old1", "new9")])
+        self.assertEqual(calls, [["auth", "priority", "openai-codex", "new9", "0"]])
         self.assertTrue(sess["promoted"])
         self.m._use_new_login(sess)  # polled again: no second reorder
         self.assertEqual(len(calls), 1)
@@ -1532,18 +1532,18 @@ class AccountRotationTest(unittest.TestCase):
         e.last_status = "dead"
         self.assertEqual(self.m._account_state("openai-codex", e)["state"], "dead")
 
-    def test_rotate_only_changes_priority(self):
+    def test_rotation_uses_only_hermes_priority_cli(self):
         calls = []
         self.m._pool_entries = lambda prov: self.entries("a", "b", "c")
         states = {"a": "full", "b": "dead", "c": "ok"}
         self.m._account_state = lambda prov, e: {"state": states[e.id]}
-        self.m._prioritize_account = lambda *args: calls.append(args) or True
+        self.m._run_hermes = lambda args: calls.append(args) or 0
         r = self.m.rotate_accounts("openai-codex")
-        self.assertEqual(calls, [("openai-codex", "a", "c")])
+        self.assertEqual(calls, [["auth", "priority", "openai-codex", "c", "0"]])
         self.assertEqual((r["switched_to"], r["states"]["b"], r["accounts"]), ("c", "dead", 3))
         self.assertTrue((self.m._hub_dir("") / "account-rotation.jsonl").exists())
 
-    def test_root_priority_update_preserves_rejected_and_profile_entries(self):
+    def test_pool_ids_reads_root_even_when_profile_has_own_entries(self):
         from hermes_cli.auth import read_credential_pool, write_credential_pool
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
         provider = "openai-codex"
@@ -1555,13 +1555,11 @@ class AccountRotationTest(unittest.TestCase):
         try:
             write_credential_pool(provider, [{"id": "local", "priority": 0}])
             self.assertEqual(self.m._pool_ids(provider), ["a", "b", "c"])
-            self.assertTrue(self.m._prioritize_account(provider, "a", "c"))
-            self.assertFalse(self.m._prioritize_account(provider, "a", "b"))
             self.assertEqual([row["id"] for row in read_credential_pool(provider)], ["local"])
         finally:
             reset_hermes_home_override(token)
         self.assertEqual([(row["id"], row["priority"], row.get("last_status")) for row in read_credential_pool(provider)],
-                         [("c", 0, None), ("a", 1, None), ("b", 2, "dead")])
+                         [("a", 0, None), ("b", 1, "dead"), ("c", 2, None)])
 
     def test_lapsed_codex_plan_is_skipped_not_removed(self):
         from types import SimpleNamespace
@@ -1620,10 +1618,10 @@ class AccountRotationTest(unittest.TestCase):
                 self.m.set_automation_settings({"auto_switch_accounts": False})
             return {"state": "full" if entry.id == "a" else "ok"}
         self.m._account_state = state_of
-        with patch.dict(os.environ), patch.object(self.m, "_start_background"), patch.object(self.m, "_prioritize_account") as prioritize:
+        with patch.dict(os.environ), patch.object(self.m, "_start_background"), patch.object(self.m, "_run_hermes") as cli:
             os.environ.pop("AGENTS_HUB_NO_BACKGROUND", None)
             self.assertFalse(self.m.rotate_accounts("openai-codex", automatic=True)["enabled"])
-            prioritize.assert_not_called()
+            cli.assert_not_called()
 
 
 class AccountListTest(unittest.TestCase):

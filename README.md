@@ -11,7 +11,7 @@ running commands · scheduled jobs · team roster · Claude & Codex usage at a g
 
 <p>
   <a href="https://github.com/mynamezxc/hermes-agent-hub/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/mynamezxc/hermes-agent-hub?style=flat-square&logo=github&color=5B6CE0"></a>
-  <a href="https://github.com/mynamezxc/hermes-agent-hub/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.6.23-5B6CE0?style=flat-square"></a>
+  <a href="https://github.com/mynamezxc/hermes-agent-hub/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.6.24-5B6CE0?style=flat-square"></a>
   <a href="https://github.com/NousResearch/hermes-agent"><img alt="Hermes Agent plugin" src="https://img.shields.io/badge/Hermes%20Agent-plugin-0E9F8E?style=flat-square"></a>
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-3B8FD9?style=flat-square">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-D9822B?style=flat-square"></a>
@@ -46,36 +46,15 @@ teammate.
 
 You need [Hermes Agent](https://hermes-agent.nousresearch.com/docs) with Hermes Desktop.
 
-**Recommended: from Hermes Desktop.** Open the Plugins page (**Settings → Plugins** or **Capabilities → Plugins**),
-choose **Install from Git**, enter `mynamezxc/hermes-agent-hub` and keep the *Desktop* target checked. This switches
-on both halves of the plugin (the page and its backend) in one go. Then restart the gateway once
-(<kbd>Ctrl</kbd>+<kbd>K</kbd> → **Restart gateway**).
-
-**From a terminal.** The installer checks for Hermes, installs or updates the plugin, enables it, verifies the result
-and **restarts the gateway** so the backend loads (agents that are running at that moment are interrupted; opt out
-with `--no-restart` / `$env:AGENTS_HUB_RESTART='0'`).
-
-**macOS / Linux / WSL / Git Bash**
+**Recommended: install through the Hermes plugin catalog.**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mynamezxc/hermes-agent-hub/main/install.sh | bash
-```
-
-**Windows (PowerShell)**
-
-```powershell
-irm https://raw.githubusercontent.com/mynamezxc/hermes-agent-hub/main/install.ps1 | iex
-```
-
-**With the Hermes CLI**
-
-```bash
-hermes plugins install mynamezxc/hermes-agent-hub --enable
+hermes plugins install agents-hub --enable
 ```
 
 After a terminal install, once:
 
-1. Restart the gateway if the installer did not (Desktop: <kbd>Ctrl</kbd>+<kbd>K</kbd> → **Restart gateway**, or
+1. Restart the gateway when no agents are running (Desktop: <kbd>Ctrl</kbd>+<kbd>K</kbd> → **Restart gateway**, or
    `hermes gateway restart`).
 2. **Turn on the desktop half.** Hermes Desktop keeps a package's desktop half switched **off** until you enable it
    (`--enable` only enables the agent half). Open **Settings → Plugins** (or **Capabilities → Plugins**), find
@@ -88,15 +67,12 @@ After a terminal install, once:
 > is starting or restarting; the Hub retries by itself.
 
 <details>
-<summary>Installer options, update, uninstall, manual install</summary>
+<summary>Source install, update, uninstall</summary>
 
-| Option | Bash | PowerShell |
-|---|---|---|
-| Install from a fork or a local checkout | `--repo owner/repo` or `AGENTS_HUB_REPO=…` | `-Repo owner/repo` or `$env:AGENTS_HUB_REPO` |
-| Replace a copy that was not installed from git | `--force` | `-Force` or `$env:AGENTS_HUB_FORCE='1'` |
-| Do not restart the gateway when done | `--no-restart` or `AGENTS_HUB_RESTART=0` | `-NoRestart` or `$env:AGENTS_HUB_RESTART='0'` |
-
-- **Update**: run the installer again, or `hermes plugins update agents-hub`.
+- **Source install (for development or while the catalog listing is unavailable)**: in Hermes Desktop, open
+  **Settings → Plugins → Install from Git**, enter `mynamezxc/hermes-agent-hub` and keep the Desktop target checked.
+  Or run `hermes plugins install mynamezxc/hermes-agent-hub --enable` and follow the steps above.
+- **Update**: `hermes plugins update agents-hub`.
 - **Uninstall**: `hermes plugins remove agents-hub`. The Hub's own state in `<HERMES_HOME>/agents-hub/` is left for you to delete.
 - **Manual**: copy this repo to `<HERMES_HOME>/plugins/agents-hub/`, add `agents-hub` to `plugins.enabled` in
   `config.yaml`, copy `desktop/plugin.js` to `<HERMES_HOME>/desktop-plugins/agents-hub/plugin.js`, restart the gateway.
@@ -205,6 +181,7 @@ The **Scheduled** tab lists every agent's cron jobs and runs. **New scheduled jo
 ### 7. Settings: accounts, usage and team
 - **Model accounts**: pick an agent to see its Codex and Claude login. **Log in** runs Hermes's flow: Codex shows a
   code and a link; Claude opens an authorize link and you paste the code back. An existing Claude Code login is used too.
+- **Claude Desktop / Cowork**: the [connection guide](docs/claude-desktop-connection.md) distinguishes the external file relay, Anthropic model login, and Claude Code CLI.
 - **Usage**: the meters under every chat box come from Hermes's read-only usage readers, cached for 10 minutes.
 - **Team**: edit each agent's name, role, who it reports to and what it is good at. Agents read this roster
   (`TEAM.md`) to decide who gets which piece of work. **New agent** creates a Hermes profile with a role `SOUL.md`
@@ -220,14 +197,14 @@ the jobs run while the backend is up, even with the Hub page closed. Viewing Wor
 | Job | When it checks | Commands it may run |
 |---|---|---|
 | Kanban task heartbeat | First check after a 30-second startup delay, then every 60 seconds | `hermes kanban promote <task-id> <reason>` for eligible tasks, and `hermes kanban create <title> --assignee … --body … --created-by agents-hub --idempotency-key … --priority …` for English `Answer` and `Review` cards. The check does not call a model; the usual Kanban dispatcher may run the resulting cards. |
-| Account auto-switch | First check after a 45-second startup delay, then every 5 minutes when a provider has multiple accounts. Usage at its limit can trigger an earlier check once 60 seconds have elapsed since the last recorded check. | No background `hermes auth` command. The Hub reads usage without refreshing and updates only priority through Hermes's credential store API when it finds a usable replacement. It never runs `hermes auth remove` automatically. |
+| Account auto-switch | First check after a 45-second startup delay, then every 5 minutes when a provider has multiple accounts. Usage at its limit can trigger an earlier check once 60 seconds have elapsed since the last recorded check. | Reads usage without refreshing and runs `hermes auth priority <provider> <id> 0` only when it finds a usable replacement. The Hub does not write Hermes's credential store directly and never runs `hermes auth remove` automatically. |
 
 Turning a job off prevents new writes after the setting is saved. An action already in flight may finish before the change is saved.
 
 Rejected and lapsed logins stay visible in **Model accounts**. Only an explicit, confirmed **Remove** there runs
 `hermes auth remove <provider> <credential-id>`. Signing in through the Hub is a separate owner-initiated action:
 Claude login invokes `hermes [-p <profile>] auth add anthropic`; a newly approved root login may be made first
-priority through Hermes's credential store API. These login actions are independent of periodic auto-switching.
+priority with `hermes auth priority <provider> <id> 0`. These login actions are independent of periodic auto-switching.
 
 See [Agents Hub improvement proposal](docs/agents-hub-improvement-proposal.md) for project-scoped goals,
 task review, and native coding runners.

@@ -3649,7 +3649,7 @@ def _use_new_login(sess: dict[str, Any]) -> None:
     new = [i for i in ids if i not in before]
     sess["promoted"] = False
     if new:
-        sess["promoted"] = _prioritize_account(sess["provider"], ids[0], new[-1])
+        sess["promoted"] = _run_hermes(["auth", "priority", sess["provider"], new[-1], "0"]) == 0
         if sess["promoted"]:
             sess["active_id"] = new[-1]
     _usage_forget(sess["provider"])
@@ -3693,22 +3693,6 @@ def _pool_entries(provider: str) -> list[Any]:
     """Inspect the root pool without load_pool()'s seeding, pruning or refresh."""
     with _root_pool_scope():
         return _persisted_entries(provider)
-
-
-def _prioritize_account(provider: str, current_id: str, target_id: str) -> bool:
-    """Reorder persisted rows under Hermes's auth lock. Never prune or resurrect a removed row."""
-    from hermes_cli.auth import _auth_store_lock, read_credential_pool, write_credential_pool
-    with _root_pool_scope(), _auth_store_lock():
-        rows = read_credential_pool(provider)
-        if not rows or any(not isinstance(row, dict) or not row.get("id") for row in rows):
-            return False
-        rows = sorted(rows, key=lambda row: (row.get("priority", 0), row["id"]))
-        target = next((row for row in rows if row["id"] == target_id), None)
-        if rows[0]["id"] != current_id or target is None or target.get("last_status") == "dead":
-            return False
-        ordered = [target, *(row for row in rows if row["id"] != target_id)]
-        write_credential_pool(provider, [{**row, "priority": i} for i, row in enumerate(ordered)])
-        return True
 
 
 def _plan_lapsed(provider: str, entry: Any) -> bool:
@@ -3798,7 +3782,7 @@ def rotate_accounts(provider: str, *, automatic: bool = False) -> dict[str, Any]
         with _automation_gate():
             if automatic and (not _background_allowed() or not _rotation_enabled()):
                 return {"provider": provider, "enabled": False}
-            if plan["use"] and _prioritize_account(provider, entries[0].id, plan["use"]):
+            if plan["use"] and _run_hermes(["auth", "priority", provider, plan["use"], "0"]) == 0:
                 applied["switched_to"] = plan["use"]
         if applied["switched_to"]:
             _usage_forget(provider)
